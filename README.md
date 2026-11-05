@@ -122,4 +122,8 @@ The widget saves its usage figures, your email and its settings in its install f
 
 ## License
 
-[MIT](LICENSE), copyright Shoaib Jadallah.
+Released under the [MIT License](LICENSE). Copyright © 2026 Shoaib Jadallah.
+
+You can use, change and share this software, including commercially, as long as you keep the copyright and license notice. It comes with no warranty.
+
+The license covers this project's own code. It doesn't grant any rights to Anthropic's trademarks, including the Claude name and logo.
