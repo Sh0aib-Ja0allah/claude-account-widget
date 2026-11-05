@@ -278,6 +278,7 @@ class WidgetWindow : Window
     readonly TextBlock leftText = new TextBlock();
     readonly Border refreshButton = new Border();
     readonly Border eyeButton = new Border();
+    readonly Border chatButton = new Border();
     readonly Border miniPill = new Border();
     readonly MenuItem accentItem = new MenuItem();
     bool switching;
@@ -603,7 +604,14 @@ class WidgetWindow : Window
         stack.Children.Add(fiveHour.Panel);
         stack.Children.Add(emptyNote);
         stack.Children.Add(divider);
-        stack.Children.Add(updated);
+
+        BuildChatButton();
+
+        updated.VerticalAlignment = VerticalAlignment.Center;
+        DockPanel footer = new DockPanel();
+        footer.Children.Add(chatButton);
+        footer.Children.Add(updated);
+        stack.Children.Add(footer);
         stack.Children.Add(checkNote);
 
         DropShadowEffect shadow = new DropShadowEffect();
@@ -758,6 +766,52 @@ class WidgetWindow : Window
         {
             button.Background = Brushes.Transparent;
             icon.Foreground = Muted;
+        };
+    }
+
+    // Placeholder for a future chat feature. Clicking it does nothing yet.
+    void BuildChatButton()
+    {
+        Shapes.Path bubble = new Shapes.Path();
+        bubble.Data = Geometry.Parse("M12 3C6.9 3 3 6.5 3 11c0 2.3 1 4.3 2.7 5.8L5 21l4.4-2.2c.8.2 1.7.2 2.6.2 5.1 0 9-3.5 9-8s-3.9-8-9-8z");
+        bubble.Stroke = Text;
+        bubble.StrokeThickness = 1.8;
+        bubble.StrokeLineJoin = PenLineJoin.Round;
+
+        Shapes.Path plus = new Shapes.Path();
+        plus.Data = Geometry.Parse("M12 7.5v7M8.5 11h7");
+        plus.Stroke = Text;
+        plus.StrokeThickness = 1.8;
+        plus.StrokeStartLineCap = PenLineCap.Round;
+        plus.StrokeEndLineCap = PenLineCap.Round;
+
+        Grid art = new Grid();
+        art.Width = 24;
+        art.Height = 24;
+        art.Children.Add(bubble);
+        art.Children.Add(plus);
+
+        Viewbox icon = new Viewbox();
+        icon.Width = 18;
+        icon.Height = 18;
+        icon.Child = art;
+
+        chatButton.Width = 28;
+        chatButton.Height = 28;
+        chatButton.CornerRadius = new CornerRadius(14);
+        chatButton.Background = Brushes.Transparent;
+        chatButton.Margin = new Thickness(8, -5, -6, -5);
+        chatButton.Cursor = Cursors.Hand;
+        chatButton.ToolTip = "New chat (coming soon)";
+        chatButton.Child = icon;
+        DockPanel.SetDock(chatButton, Dock.Right);
+
+        chatButton.MouseEnter += delegate { chatButton.Background = OverlayMid; };
+        chatButton.MouseLeave += delegate { chatButton.Background = Brushes.Transparent; };
+        chatButton.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+        {
+            // Keeps the click from starting a window drag.
+            e.Handled = true;
         };
     }
 
