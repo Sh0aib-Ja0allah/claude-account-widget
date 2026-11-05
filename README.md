@@ -2,7 +2,7 @@
 
 A small Windows desktop widget that shows which account Claude Code is signed in to and how much of your plan's usage limit you've used.
 
-![The full widget and small icon in dark and light themes, showing a sample account at 52% of the 7-day limit](docs/widget.png)
+![The full widget and small icon in dark and light themes, plus the right-click menu with its ring color options, showing a sample account at 52% of the 7-day limit](docs/widget.png)
 
 > **Unofficial project.** This isn't affiliated with or endorsed by Anthropic. Claude and the Claude logo are Anthropic's trademarks.
 
@@ -23,7 +23,9 @@ A small Windows desktop widget that shows which account Claude Code is signed in
 
 ## Install
 
-Download the source, then run this from the repo folder:
+**Download:** get `ClaudeAccountWidget.exe` from the [Releases page](https://github.com/Sh0aib-Ja0allah/claude-account-widget/releases), put it in its own folder, and run it. The file isn't digitally signed, so Windows SmartScreen or your antivirus may warn you.
+
+**Build from source:** this lets you review the code first. Download the source, then run this from the repo folder:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1
@@ -34,6 +36,8 @@ This compiles the widget with the C# compiler included in Windows and installs i
 ```powershell
 & "$env:LOCALAPPDATA\ClaudeAccountWidget\ClaudeAccountWidget.exe"
 ```
+
+The widget keeps its files in the folder it runs from, so the optional settings and uninstall steps below use that folder if you downloaded the file.
 
 ## Using it
 
