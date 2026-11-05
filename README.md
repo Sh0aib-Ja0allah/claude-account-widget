@@ -16,6 +16,7 @@ This is an early pre-release, so expect some rough edges.
 - **Small icon:** minimizes to a pill that keeps the percentage visible.
 - **Appearance:** follows the Windows light or dark theme, with six ring colors.
 - **Alert colors:** turns amber at 70% and red at 90%, whichever ring color you choose.
+- **New chat button:** a placeholder in the widget's footer. It doesn't do anything yet.
 
 ## Requirements
 
