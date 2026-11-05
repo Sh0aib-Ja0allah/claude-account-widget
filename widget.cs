@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
@@ -345,6 +346,106 @@ class WidgetWindow : Window
     static readonly SolidColorBrush PillHover = Live("#73757D");
     static readonly SolidColorBrush BadgeEdge = Live("#17181B");
 
+    // Matches the right-click menu to the widget. ApplyTheme supplies its colors.
+    const string MenuXaml = @"
+<ResourceDictionary xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+                    xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
+  <ControlTemplate x:Key='MenuPanel' TargetType='ContentControl'>
+    <Border Margin='10' MinWidth='172' Padding='4' CornerRadius='12' BorderThickness='1'
+            Background='{DynamicResource MenuBackground}' BorderBrush='{DynamicResource MenuEdge}'>
+      <Border.Effect>
+        <DropShadowEffect BlurRadius='16' ShadowDepth='3' Direction='270' Opacity='0.4'/>
+      </Border.Effect>
+      <ContentPresenter/>
+    </Border>
+  </ControlTemplate>
+
+  <Style TargetType='ContextMenu'>
+    <Setter Property='OverridesDefaultStyle' Value='True'/>
+    <Setter Property='HasDropShadow' Value='False'/>
+    <Setter Property='FontFamily' Value='Segoe UI'/>
+    <Setter Property='FontSize' Value='12.5'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='ContextMenu'>
+          <ContentControl Template='{StaticResource MenuPanel}' Focusable='False'>
+            <StackPanel IsItemsHost='True' KeyboardNavigation.DirectionalNavigation='Cycle'/>
+          </ContentControl>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style x:Key='{x:Static MenuItem.SeparatorStyleKey}' TargetType='Separator'>
+    <Setter Property='OverridesDefaultStyle' Value='True'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='Separator'>
+          <Border Height='1' Margin='8,4' Background='{DynamicResource MenuHover}'/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType='MenuItem'>
+    <Setter Property='OverridesDefaultStyle' Value='True'/>
+    <Setter Property='Foreground' Value='{DynamicResource MenuText}'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='MenuItem'>
+          <Grid SnapsToDevicePixels='True'>
+            <Border x:Name='Row' CornerRadius='8' Background='Transparent' Padding='8,6,10,6'>
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width='20'/>
+                  <ColumnDefinition Width='Auto'/>
+                  <ColumnDefinition Width='*'/>
+                  <ColumnDefinition Width='Auto'/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name='Check' Text='&#xE73E;' FontFamily='Segoe MDL2 Assets' FontSize='11'
+                           VerticalAlignment='Center' Visibility='Collapsed'/>
+                <ContentPresenter x:Name='Swatch' Grid.Column='1' ContentSource='Icon' Margin='0,0,8,0' VerticalAlignment='Center'/>
+                <ContentPresenter Grid.Column='2' ContentSource='Header' RecognizesAccessKey='True' VerticalAlignment='Center'/>
+                <TextBlock x:Name='Arrow' Grid.Column='3' Text='&#xE76C;' FontFamily='Segoe MDL2 Assets' FontSize='9'
+                           Margin='16,0,0,0' VerticalAlignment='Center' Foreground='{DynamicResource MenuMuted}' Visibility='Collapsed'/>
+              </Grid>
+            </Border>
+            <Popup x:Name='PART_Popup' Placement='Right' HorizontalOffset='-8' VerticalOffset='-15'
+                   AllowsTransparency='True' Focusable='False' PopupAnimation='Fade'
+                   IsOpen='{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}'>
+              <ContentControl Template='{StaticResource MenuPanel}' Focusable='False' FontFamily='Segoe UI' FontSize='12.5'>
+                <StackPanel IsItemsHost='True' KeyboardNavigation.DirectionalNavigation='Cycle'/>
+              </ContentControl>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsChecked' Value='True'>
+              <Setter TargetName='Check' Property='Visibility' Value='Visible'/>
+            </Trigger>
+            <Trigger Property='Icon' Value='{x:Null}'>
+              <Setter TargetName='Swatch' Property='Visibility' Value='Collapsed'/>
+            </Trigger>
+            <Trigger Property='Role' Value='SubmenuHeader'>
+              <Setter TargetName='Arrow' Property='Visibility' Value='Visible'/>
+            </Trigger>
+            <Trigger Property='IsHighlighted' Value='True'>
+              <Setter TargetName='Row' Property='Background' Value='{DynamicResource MenuHover}'/>
+            </Trigger>
+            <Trigger Property='IsSubmenuOpen' Value='True'>
+              <Setter TargetName='Row' Property='Background' Value='{DynamicResource MenuHover}'/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+</ResourceDictionary>";
+
+    static void ApplyMenuStyle()
+    {
+        Application.Current.Resources.MergedDictionaries.Add((ResourceDictionary)XamlReader.Parse(MenuXaml));
+    }
+
     public WidgetWindow(string dataDir, string accountPath, string credentialsPath, string url, int pollSeconds, int manualGapSeconds)
     {
         credentialsFile = credentialsPath;
@@ -380,6 +481,7 @@ class WidgetWindow : Window
         card = BuildCard();
         miniIcon = BuildMiniIcon();
         Content = card;
+        ApplyMenuStyle();
         ContextMenu = BuildMenu();
         LoadSettings();
         ApplyTheme();
@@ -922,6 +1024,14 @@ class WidgetWindow : Window
         PillEdge.Color = Hex(light ? "#CFCEC9" : "#44464C");
         PillHover.Color = Hex(light ? "#A09F99" : "#73757D");
         BadgeEdge.Color = Hex(light ? "#FFFFFF" : "#17181B");
+
+        // Application resources freeze a brush once it's used, so the menu gets new brushes each time.
+        ResourceDictionary resources = Application.Current.Resources;
+        resources["MenuBackground"] = Live(light ? "#FFFFFF" : "#232428");
+        resources["MenuEdge"] = Live(light ? "#D6D5D0" : "#44464C");
+        resources["MenuHover"] = Live(light ? "#12000000" : "#1FFFFFFF");
+        resources["MenuText"] = Live(light ? "#1C1C1E" : "#F2F2F0");
+        resources["MenuMuted"] = Live(light ? "#66665F" : "#A3A3A0");
         heroGlow.Opacity = light ? 0.18 : 0.35;
 
         cardBorder.Background = CardFill(light);
@@ -973,6 +1083,13 @@ class WidgetWindow : Window
             item.Header = Accents[i, 1];
             item.Tag = key;
             item.IsCheckable = true;
+
+            Shapes.Ellipse swatch = new Shapes.Ellipse();
+            swatch.Width = 10;
+            swatch.Height = 10;
+            swatch.Fill = Accents[i, 2].Length == 0 ? (Brush)Text : Color(Accents[i, 2]);
+            item.Icon = swatch;
+
             item.Click += delegate
             {
                 accentName = key;
