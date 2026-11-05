@@ -2,6 +2,8 @@
 
 A small Windows desktop widget that shows which account Claude Code is signed in to and how much of your plan's usage limit you've used.
 
+![The full widget and small icon in dark and light themes, showing a sample account at 52% of the 7-day limit](docs/widget.png)
+
 > **Unofficial project.** This isn't affiliated with or endorsed by Anthropic. Claude and the Claude logo are Anthropic's trademarks.
 
 ## Features
