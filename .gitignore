@@ -3,3 +3,9 @@
 usage.json
 settings.txt
 expected-account.txt
+chat-history-folder.txt
+chat-access.txt
+chat-options.txt
+chat-read-folders.txt
+chat-model-versions.txt
+chat-output-folder.txt
