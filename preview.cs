@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -1539,6 +1540,11 @@ sealed class TextColors
 {
     internal readonly Color Text, Muted, Comment, String, Number, Keyword, Attribute, CodeFill, QuoteEdge, Link, Added, Removed, TableEdge;
 
+    // Set for chat replies, which are smaller than a document and have working links and code blocks.
+    internal bool Compact;
+    internal Action<string> OpenLink;
+    internal Func<string, string, Block> BuildCode;
+
     internal TextColors(bool light, bool paper)
     {
         Text = paper ? Colors.Black : WidgetWindow.Text.Color;
@@ -1694,14 +1700,77 @@ static class DocumentBuilder
         return document;
     }
 
-    static readonly Regex InlinePattern = new Regex(
-        @"(?<code>`[^`\n]+`)|(?<image>!\[[^\]]*\]\([^)]*\))|(?<link>\[[^\]]+\]\([^)]*\))|(?<bold>\*\*.+?\*\*|__.+?__)|(?<strike>~~.+?~~)|(?<em>(?<![\w*])\*[^*\s][^*\n]*\*|(?<![\w_])_[^_\s][^_\n]*_)",
-        RegexOptions.ExplicitCapture);
+    const string InlineTail =
+        @"(?<bold>\*\*.+?\*\*|__.+?__)|(?<strike>~~.+?~~)|(?<em>(?<![\w*])\*[^*\s][^*\n]*\*|(?<![\w_])_[^_\s][^_\n]*_)";
 
-    static void AddInline(InlineCollection target, string text, TextColors colors)
+    static readonly Regex InlinePattern = new Regex(
+        @"(?<code>`[^`\n]+`)|(?<image>!\[[^\]]*\]\([^)]*\))|(?<link>\[[^\]]+\]\([^)]*\))|(?<url><https?://[^\s<>]+>|https?://[^\s<>""'`]+)|" + InlineTail,
+        RegexOptions.ExplicitCapture, TimeSpan.FromSeconds(2));
+
+    // Replies are untrusted and drawn again as they arrive, so their runs are bounded.
+    // Documents keep the open pattern, because they can hold very long links and embedded pictures.
+    static readonly Regex ChatInlinePattern = new Regex(
+        @"(?<code>`[^`\n]+`)|(?<image>!\[[^\]]{0,1000}\]\([^)\n]{0,2000}\))|(?<link>\[[^\]]{1,1000}\]\((?:[^()\n]|\([^()\n]{0,500}\)){0,2000}\))|(?<url><https?://[^\s<>]{1,2000}>|https?://[^\s<>""'`]+)|" + InlineTail,
+        RegexOptions.ExplicitCapture, TimeSpan.FromMilliseconds(250));
+
+    // Only ordinary web addresses can become links, never a file or a program.
+    internal static bool IsWebLink(string address)
     {
+        // Invisible characters can make an address read differently from where it goes.
+        foreach (char c in address)
+        {
+            UnicodeCategory category = char.GetUnicodeCategory(c);
+            if (category == UnicodeCategory.Format || category == UnicodeCategory.Control) return false;
+        }
+        Uri uri;
+        if (!Uri.TryCreate(address, UriKind.Absolute, out uri)) return false;
+
+        // A malformed site name only fails when its encoded form is asked for.
+        try { if (uri.IdnHost.Length == 0) return false; }
+        catch (UriFormatException) { return false; }
+        return (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) && uri.UserInfo.Length == 0;
+    }
+
+    // A link that works where the text allows it, with its real address in the hint because the words can say anything.
+    static Span NewLink(string address, TextColors colors)
+    {
+        Span link;
+        if (colors.OpenLink != null && IsWebLink(address))
+        {
+            Hyperlink working = new Hyperlink();
+
+            // Letters from other alphabets can imitate a site's name, so its encoded name is shown too.
+            Uri uri = new Uri(address);
+            working.ToolTip = uri.IdnHost == uri.Host.ToLowerInvariant() ? address : address + "\nSite: " + uri.IdnHost;
+            working.Click += delegate { colors.OpenLink(address); };
+            link = working;
+        }
+        else link = new Span();
+        link.Foreground = new SolidColorBrush(colors.Link);
+        link.TextDecorations = TextDecorations.Underline;
+        return link;
+    }
+
+    static void AddInline(InlineCollection target, string text, TextColors colors, int depth = 0, bool inLink = false)
+    {
+        // Text nested this deep, or this long on one line, isn't worth the risk of stalling on it.
+        if (depth > 6 || (colors.Compact && text.Length > 20000))
+        {
+            target.Add(new Run(text));
+            return;
+        }
         int at = 0;
-        foreach (Match match in InlinePattern.Matches(text))
+        List<Match> found = new List<Match>();
+        try
+        {
+            foreach (Match match in (colors.Compact ? ChatInlinePattern : InlinePattern).Matches(text)) found.Add(match);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            target.Add(new Run(text));
+            return;
+        }
+        foreach (Match match in found)
         {
             if (match.Index > at) target.Add(new Run(text.Substring(at, match.Index - at)));
             string value = match.Value;
@@ -1720,34 +1789,62 @@ static class DocumentBuilder
             }
             else if (match.Groups["link"].Success)
             {
-                Span link = new Span();
-                AddInline(link.Inlines, value.Substring(1, value.IndexOf(']') - 1), colors);
-                link.Foreground = new SolidColorBrush(colors.Link);
-                link.TextDecorations = TextDecorations.Underline;
+                int split = value.IndexOf("](");
+                string address = value.Substring(split + 2, value.Length - split - 3).Trim();
+                int space = address.IndexOfAny(new[] { ' ', '\t' });
+                if (space > 0) address = address.Substring(0, space);
+                Span link = inLink ? new Span() : NewLink(address, colors);
+                AddInline(link.Inlines, value.Substring(1, split - 1), colors, depth + 1, true);
                 target.Add(link);
+            }
+            else if (match.Groups["url"].Success)
+            {
+                string address = TrimAddress(value.Trim('<', '>'));
+                string after = value.StartsWith("<") ? "" : value.Substring(address.Length);
+                if (!inLink && colors.OpenLink != null && IsWebLink(address))
+                {
+                    Span link = NewLink(address, colors);
+                    link.Inlines.Add(new Run(address));
+                    target.Add(link);
+                    if (after.Length > 0) target.Add(new Run(after));
+                }
+                else target.Add(new Run(value));
             }
             else if (match.Groups["bold"].Success)
             {
                 Bold bold = new Bold();
-                AddInline(bold.Inlines, value.Substring(2, value.Length - 4), colors);
+                AddInline(bold.Inlines, value.Substring(2, value.Length - 4), colors, depth + 1, inLink);
                 target.Add(bold);
             }
             else if (match.Groups["strike"].Success)
             {
                 Span strike = new Span();
-                AddInline(strike.Inlines, value.Substring(2, value.Length - 4), colors);
+                AddInline(strike.Inlines, value.Substring(2, value.Length - 4), colors, depth + 1, inLink);
                 strike.TextDecorations = TextDecorations.Strikethrough;
                 target.Add(strike);
             }
             else
             {
                 Italic italic = new Italic();
-                AddInline(italic.Inlines, value.Substring(1, value.Length - 2), colors);
+                AddInline(italic.Inlines, value.Substring(1, value.Length - 2), colors, depth + 1, inLink);
                 target.Add(italic);
             }
             at = match.Index + match.Length;
         }
         if (at < text.Length) target.Add(new Run(text.Substring(at)));
+    }
+
+    // Punctuation after an address belongs to the sentence, unless it closes a bracket inside the address.
+    static string TrimAddress(string address)
+    {
+        while (address.Length > 0)
+        {
+            char last = address[address.Length - 1];
+            bool closes = last == ')' && address.Split('(').Length >= address.Split(')').Length;
+            if (closes || ".,;:!?)]".IndexOf(last) < 0) break;
+            address = address.Substring(0, address.Length - 1);
+        }
+        return address;
     }
 
     // Written in an Arabic or Hebrew script, a block reads from the right.
@@ -1767,7 +1864,14 @@ static class DocumentBuilder
         paragraph.Margin = new Thickness(0, 0, 0, 9);
         paragraph.LineHeight = 20;
         paragraph.FlowDirection = DirectionOf(text);
-        AddInline(paragraph.Inlines, text, colors);
+
+        // A chat reply keeps its line breaks, because plain-text replies rely on them.
+        string[] lines = text.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (i > 0) paragraph.Inlines.Add(new LineBreak());
+            AddInline(paragraph.Inlines, lines[i], colors);
+        }
         return paragraph;
     }
 
@@ -1782,7 +1886,7 @@ static class DocumentBuilder
         FlowDocument document = Empty(colors, false);
         string[] lines = source.Replace("\r\n", "\n").Split('\n');
         int at = 0;
-        if (lines.Length > 0 && lines[0].Trim() == "---")
+        if (!colors.Compact && lines.Length > 0 && lines[0].Trim() == "---")
         {
             for (int i = 1; i < lines.Length; i++)
             {
@@ -1803,17 +1907,25 @@ static class DocumentBuilder
 
             if (line.TrimStart().StartsWith("```") || line.TrimStart().StartsWith("~~~"))
             {
-                string fence = line.TrimStart().Substring(0, 3);
-                string language = line.TrimStart().Substring(3).Trim();
+                string opening = line.TrimStart();
+                int fenceLength = 0;
+                while (fenceLength < opening.Length && opening[fenceLength] == opening[0]) fenceLength++;
+                string fence = opening.Substring(0, fenceLength);
+                string language = opening.Substring(fenceLength).Trim();
                 StringBuilder code = new StringBuilder();
                 at++;
-                while (at < lines.Length && !lines[at].TrimStart().StartsWith(fence))
+                while (at < lines.Length && !ClosesFence(lines[at], fence))
                 {
                     if (code.Length > 0) code.Append('\n');
                     code.Append(lines[at]);
                     at++;
                 }
                 at++;
+                if (colors.BuildCode != null)
+                {
+                    document.Blocks.Add(colors.BuildCode(code.ToString(), language));
+                    continue;
+                }
                 Paragraph block = new Paragraph();
                 block.FontFamily = new FontFamily("Consolas");
                 block.FontSize = 12.5;
@@ -1832,7 +1944,8 @@ static class DocumentBuilder
                 int level = heading.Groups[1].Length;
                 Paragraph title = new Paragraph();
                 title.FontWeight = FontWeights.SemiBold;
-                title.FontSize = level == 1 ? 23 : level == 2 ? 19 : level == 3 ? 16 : 14;
+                if (colors.Compact) title.FontSize = level == 1 ? 17 : level == 2 ? 15.5 : level == 3 ? 14 : 13;
+                else title.FontSize = level == 1 ? 23 : level == 2 ? 19 : level == 3 ? 16 : 14;
                 title.Margin = new Thickness(0, level <= 2 ? 12 : 8, 0, 7);
                 title.FlowDirection = DirectionOf(heading.Groups[2].Value);
                 AddInline(title.Inlines, heading.Groups[2].Value, colors);
@@ -1865,13 +1978,13 @@ static class DocumentBuilder
                 Paragraph block = TextParagraph(quote.ToString(), colors);
                 block.Foreground = new SolidColorBrush(colors.Muted);
                 block.BorderBrush = new SolidColorBrush(colors.QuoteEdge);
-                block.BorderThickness = block.FlowDirection == FlowDirection.RightToLeft ? new Thickness(0, 0, 3, 0) : new Thickness(3, 0, 0, 0);
+                block.BorderThickness = new Thickness(3, 0, 0, 0);
                 block.Padding = new Thickness(10, 2, 10, 2);
                 document.Blocks.Add(block);
                 continue;
             }
 
-            if (line.Contains("|") && at + 1 < lines.Length && TableRule.IsMatch(lines[at + 1]) && lines[at + 1].Contains("-"))
+            if (IsTableStart(lines, at))
             {
                 document.Blocks.Add(BuildTable(lines, ref at, colors));
                 continue;
@@ -1885,14 +1998,28 @@ static class DocumentBuilder
 
             StringBuilder text = new StringBuilder(line.Trim());
             at++;
-            while (at < lines.Length && lines[at].Trim().Length > 0 && !IsBlockStart(lines[at]))
+            while (at < lines.Length && lines[at].Trim().Length > 0 && !IsBlockStart(lines[at]) && !IsTableStart(lines, at))
             {
-                text.Append(' ').Append(lines[at].Trim());
+                text.Append(colors.Compact ? '\n' : ' ').Append(lines[at].Trim());
                 at++;
             }
             document.Blocks.Add(TextParagraph(text.ToString(), colors));
         }
         return document;
+    }
+
+    static bool IsTableStart(string[] lines, int at)
+    {
+        if (!lines[at].Contains("|") || at + 1 >= lines.Length || !TableRule.IsMatch(lines[at + 1]) || !lines[at + 1].Contains("-")) return false;
+
+        // Without matching columns it's a sentence with a pipe in it, followed by a rule.
+        return SplitTableRow(lines[at]).Length == SplitTableRow(lines[at + 1]).Length;
+    }
+
+    static bool ClosesFence(string line, string fence)
+    {
+        string trimmed = line.Trim();
+        return trimmed.Length >= fence.Length && trimmed.Trim(fence[0]).Length == 0;
     }
 
     static bool IsBlockStart(string line)
@@ -1901,7 +2028,7 @@ static class DocumentBuilder
         return start.StartsWith("```") || start.StartsWith("~~~") || start.StartsWith(">") || Heading.IsMatch(line) || Rule.IsMatch(line) || Bullet.IsMatch(line) || Numbered.IsMatch(line);
     }
 
-    static string LanguageExtension(string language)
+    internal static string LanguageExtension(string language)
     {
         switch (language.ToLowerInvariant())
         {
@@ -1916,7 +2043,7 @@ static class DocumentBuilder
         }
     }
 
-    static List BuildList(string[] lines, ref int at, TextColors colors)
+    static List BuildList(string[] lines, ref int at, TextColors colors, int level = 0)
     {
         bool numbered = Numbered.IsMatch(lines[at]);
         int indent = lines[at].Length - lines[at].TrimStart().Length;
@@ -1924,6 +2051,15 @@ static class DocumentBuilder
         list.MarkerStyle = numbered ? TextMarkerStyle.Decimal : TextMarkerStyle.Disc;
         list.Margin = new Thickness(0, 0, 0, 9);
         list.Padding = new Thickness(22, 0, 0, 0);
+        list.FlowDirection = DirectionOf(lines[at]);
+
+        // A list broken up by a paragraph carries on from its own number.
+        Match firstNumber = Numbered.Match(lines[at]);
+        int startNumber;
+        if (firstNumber.Success && int.TryParse(firstNumber.Groups[2].Value, out startNumber) && startNumber >= 1 && startNumber <= 1000000)
+        {
+            list.StartIndex = startNumber;
+        }
         ListItem item = null;
         while (at < lines.Length)
         {
@@ -1948,9 +2084,9 @@ static class DocumentBuilder
                 continue;
             }
             int depth = match.Groups[1].Length;
-            if (depth > indent && item != null)
+            if (depth > indent && item != null && level < 8)
             {
-                item.Blocks.Add(BuildList(lines, ref at, colors));
+                item.Blocks.Add(BuildList(lines, ref at, colors, level + 1));
                 continue;
             }
             if (depth < indent) break;
@@ -1969,8 +2105,32 @@ static class DocumentBuilder
     {
         string trimmed = line.Trim();
         if (trimmed.StartsWith("|")) trimmed = trimmed.Substring(1);
-        if (trimmed.EndsWith("|")) trimmed = trimmed.Substring(0, trimmed.Length - 1);
-        return trimmed.Split('|');
+        if (trimmed.EndsWith("|") && !trimmed.EndsWith("\\|")) trimmed = trimmed.Substring(0, trimmed.Length - 1);
+
+        List<string> cells = new List<string>();
+        StringBuilder cell = new StringBuilder();
+        bool inCode = false;
+        for (int i = 0; i < trimmed.Length; i++)
+        {
+            char c = trimmed[i];
+            if (c == '\\' && i + 1 < trimmed.Length && trimmed[i + 1] == '|')
+            {
+                cell.Append('|');
+                i++;
+            }
+            else if (c == '|' && !inCode)
+            {
+                cells.Add(cell.ToString());
+                cell.Clear();
+            }
+            else
+            {
+                if (c == '`') inCode = !inCode;
+                cell.Append(c);
+            }
+        }
+        cells.Add(cell.ToString());
+        return cells.ToArray();
     }
 
     static Table BuildTable(string[] lines, ref int at, TextColors colors)

@@ -1798,6 +1798,7 @@ class ChatEntry
     public string Path;
     public string Title;
     public DateTime Started;
+    public string Text;
 }
 
 class ChatTurn
@@ -1807,6 +1808,20 @@ class ChatTurn
     public string Detail;
     public List<ChatAttachment> Attachments = new List<ChatAttachment>();
     public List<string> CreatedFiles = new List<string>();
+
+    // Where this turn starts in the window, and its Regenerate button. Neither is saved.
+    internal UIElement First;
+    internal UIElement Regenerate;
+}
+
+// What was taken out of a chat to edit or regenerate it, so a failed request can put it all back.
+class ChatRewind
+{
+    public List<ChatTurn> Turns;
+    public List<UIElement> Elements = new List<UIElement>();
+    public List<ChatAttachment> Sent;
+    public List<Border> Bubbles;
+    public List<string> Files;
 }
 
 class ChatRequest
@@ -1845,7 +1860,8 @@ class ChatResult
 // other processes can see command lines, and it's never written anywhere from here.
 class ChatClient
 {
-    const string StyleRule = "You are chatting in a small desktop chat window, so reply in plain text without Markdown formatting. ";
+    const string StyleRule = "You are chatting in a desktop chat window that shows Markdown: headings, bold, italics, lists, tables, code blocks and links. " +
+        "It doesn't show images. Use plain sentences for short answers, and formatting only where it helps. ";
     const string RecallRule =
         "The current folder holds the user's earlier saved chats from these windows as Markdown notes, in folders by month. " +
         "Search it with Grep and Glob, then Read matching notes, whenever earlier chats might matter or the user refers to something from before. " +
@@ -1878,6 +1894,12 @@ class ChatClient
     bool stopRequested;
     bool waitingForUser;
     DateTime lastActivity;
+    readonly StringBuilder liveText = new StringBuilder();
+
+    // These run as a reply comes in. Only the final result is the saved reply.
+    public Action<string> ReplyText;
+    public Action ReplyRestarted;
+    public Action<string> Activity;
 
     static string FindClaude()
     {
@@ -1978,7 +2000,7 @@ class ChatClient
         string arguments =
             "-p --safe-mode --restricted --no-session-persistence --strict-mcp-config " +
             "--permission-mode manual --permission-prompt-tool stdio " +
-            "--input-format stream-json --output-format stream-json --verbose " +
+            "--input-format stream-json --output-format stream-json --verbose --include-partial-messages " +
             (request.Model.Length > 0 ? "--model " + request.Model + " " : "") +
             (request.Effort.Length > 0 ? "--effort " + request.Effort + " " : "") +
             "--tools \"" + tools + "\" --append-system-prompt \"" + rules + "\"" +
@@ -2137,6 +2159,14 @@ class ChatClient
             {
                 modelUsed = Regex.Replace((string)message["model"], @"[^\w.\-]", "");
             }
+            else if (type == "stream_event")
+            {
+                OnStreamEvent(message);
+            }
+            else if (type == "assistant")
+            {
+                OnAssistantMessage(message);
+            }
             else if (type == "control_request")
             {
                 await Answer(stdin, json, message, approve);
@@ -2155,6 +2185,87 @@ class ChatClient
             }
         }
         return final ?? new ChatResult(ChatOutcome.Failed, other.Length > 0 ? other.ToString() : null);
+    }
+
+    static Dictionary<string, object> Child(Dictionary<string, object> parent, string name)
+    {
+        return parent.ContainsKey(name) ? parent[name] as Dictionary<string, object> : null;
+    }
+
+    void Report(string activity)
+    {
+        if (Activity != null) Activity(activity);
+    }
+
+    void OnStreamEvent(Dictionary<string, object> message)
+    {
+        Dictionary<string, object> streamed = Child(message, "event");
+        if (streamed == null) return;
+        string kind = Field(streamed, "type");
+        if (kind == "content_block_start")
+        {
+            Dictionary<string, object> block = Child(streamed, "content_block");
+            if (block == null) return;
+            string blockType = Field(block, "type");
+            if (blockType == "text")
+            {
+                // Text before a tool isn't part of the final reply, so each new block replaces it.
+                liveText.Clear();
+                if (ReplyRestarted != null) ReplyRestarted();
+                Report("Writing the reply");
+            }
+            else if (blockType == "thinking") Report("Thinking");
+            else if (blockType == "tool_use") Report(ActivityFor(Field(block, "name"), null));
+        }
+        else if (kind == "content_block_delta")
+        {
+            Dictionary<string, object> delta = Child(streamed, "delta");
+            if (delta == null || Field(delta, "type") != "text_delta") return;
+            liveText.Append(Field(delta, "text"));
+            if (ReplyText != null) ReplyText(liveText.ToString());
+        }
+    }
+
+    // The finished message has the tool's details, which aren't known when the tool first appears.
+    void OnAssistantMessage(Dictionary<string, object> message)
+    {
+        Dictionary<string, object> body = Child(message, "message");
+        object[] blocks = body != null && body.ContainsKey("content") ? body["content"] as object[] : null;
+        if (blocks == null) return;
+        foreach (object item in blocks)
+        {
+            Dictionary<string, object> block = item as Dictionary<string, object>;
+            if (block == null || Field(block, "type") != "tool_use") continue;
+            Report(ActivityFor(Field(block, "name"), Child(block, "input")));
+        }
+    }
+
+    internal static string ActivityFor(string tool, Dictionary<string, object> input)
+    {
+        string path = input != null ? Field(input, "file_path") : "";
+        string[] parts = path.Split('\\', '/');
+        string file = parts[parts.Length - 1];
+        string text;
+        switch (tool)
+        {
+            case "Read": text = file.Length > 0 ? "Reading " + file : "Reading a file"; break;
+            case "Write": text = file.Length > 0 ? "Writing " + file : "Writing a file"; break;
+            case "Edit": text = file.Length > 0 ? "Editing " + file : "Editing a file"; break;
+            case "Grep": text = "Searching your files"; break;
+            case "Glob": text = "Looking for files"; break;
+            case "Bash": text = "Running a command"; break;
+            case "WebSearch":
+                string query = input != null ? Field(input, "query") : "";
+                text = query.Length > 0 ? "Searching the web for " + query : "Searching the web";
+                break;
+            case "WebFetch":
+                Uri page;
+                text = input != null && Uri.TryCreate(Field(input, "url"), UriKind.Absolute, out page) ? "Opening " + page.Host : "Opening a web page";
+                break;
+            default: text = "Working"; break;
+        }
+        text = Regex.Replace(text, @"\s+", " ");
+        return text.Length > 70 ? text.Substring(0, 70) + "\u2026" : text;
     }
 
     async Task Answer(Stream stdin, JavaScriptSerializer json, Dictionary<string, object> message, Func<string, string, Task<bool>> approve)
@@ -2979,6 +3090,10 @@ class ChatWindow : Window
     bool editingTitle;
     readonly Border historyPanel = new Border();
     readonly StackPanel historyList = new StackPanel();
+    readonly TextBox historySearch = new TextBox();
+    readonly TextBlock recentsLabel = new TextBlock();
+    readonly DispatcherTimer searchTimer = new DispatcherTimer();
+    List<ChatEntry> historyEntries;
     bool historyHidden;
     int historyRefresh;
     readonly ScrollViewer scroller = new ScrollViewer();
@@ -3005,6 +3120,21 @@ class ChatWindow : Window
     Border pendingAllow;
     Border pendingDeny;
     TextBlock pendingResult;
+
+    ChatRewind activeRewind;
+    bool? repliesDrawnLight;
+    ChatTurn editingTurn;
+    string editDraft;
+    List<ChatAttachment> editDraftFiles;
+    bool retryRegenerates;
+    readonly Border editBanner = new Border();
+    readonly TextBlock editBannerText = new TextBlock();
+    Border liveBubble;
+    string liveText;
+    bool liveRestarted;
+    string activity;
+    readonly DispatcherTimer liveTimer = new DispatcherTimer();
+    readonly Dictionary<Border, string> replyTexts = new Dictionary<Border, string>();
 
     public ChatWindow(string dataFolder)
     {
@@ -3040,6 +3170,14 @@ class ChatWindow : Window
 
         workingTimer.Interval = TimeSpan.FromSeconds(1);
         workingTimer.Tick += delegate { ShowWorking(); };
+        liveTimer.Interval = TimeSpan.FromMilliseconds(80);
+        liveTimer.Tick += delegate { ShowLiveText(); };
+        searchTimer.Interval = TimeSpan.FromMilliseconds(150);
+        searchTimer.Tick += delegate
+        {
+            searchTimer.Stop();
+            ShowHistoryRows();
+        };
 
         PreviewKeyDown += OnPreviewKey;
         AllowDrop = true;
@@ -3131,7 +3269,10 @@ class ChatWindow : Window
         AddToRow(layout, BuildHeader(), 0);
         AddToRow(layout, BuildSaveNote(), 1);
         AddToRow(layout, BuildConversation(), 2);
-        AddToRow(layout, BuildStatusRow(), 3);
+        StackPanel statusArea = new StackPanel();
+        statusArea.Children.Add(BuildStatusRow());
+        statusArea.Children.Add(BuildEditBanner());
+        AddToRow(layout, statusArea, 3);
         AddToRow(layout, BuildComposer(), 4);
 
         ColumnDefinition listColumn = new ColumnDefinition();
@@ -3374,7 +3515,9 @@ class ChatWindow : Window
         if (noteWriter == null) return;
         noteWriter.Title = name;
         if (noteWriter.NotePath == null) return;
-        ShowSaveState(noteWriter.Save(turns));
+        List<ChatTurn> whole = new List<ChatTurn>(turns);
+        if (activeRewind != null) whole.AddRange(activeRewind.Turns);
+        ShowSaveState(noteWriter.Save(whole));
         if (historyPanel.Visibility == Visibility.Visible) RefreshHistory();
     }
 
@@ -3419,12 +3562,15 @@ class ChatWindow : Window
         DockPanel panel = new DockPanel();
         UIElement brand = BuildSidebarBrand();
         UIElement newChat = BuildNewChatRow();
+        UIElement search = BuildSearchBox();
         UIElement label = BuildRecentsLabel();
         DockPanel.SetDock(brand, Dock.Top);
         DockPanel.SetDock(newChat, Dock.Top);
+        DockPanel.SetDock(search, Dock.Top);
         DockPanel.SetDock(label, Dock.Top);
         panel.Children.Add(brand);
         panel.Children.Add(newChat);
+        panel.Children.Add(search);
         panel.Children.Add(label);
 
         ScrollViewer scroll = new ScrollViewer();
@@ -3495,15 +3641,83 @@ class ChatWindow : Window
         return row;
     }
 
-    static UIElement BuildRecentsLabel()
+    UIElement BuildSearchBox()
     {
-        TextBlock label = new TextBlock();
-        label.Text = "Recents";
-        label.FontSize = 11;
-        label.FontWeight = FontWeights.SemiBold;
-        label.Foreground = WidgetWindow.Muted;
-        label.Margin = new Thickness(10, 16, 0, 5);
-        return label;
+        TextBlock icon = new TextBlock();
+        icon.Text = "\uE721";
+        icon.FontFamily = new FontFamily("Segoe MDL2 Assets");
+        icon.FontSize = 11;
+        icon.Foreground = WidgetWindow.Muted;
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        icon.Margin = new Thickness(0, 0, 8, 0);
+        DockPanel.SetDock(icon, Dock.Left);
+
+        Border clear = new Border();
+        TextBlock clearIcon = new TextBlock();
+        WidgetWindow.BuildHeaderButton(clear, clearIcon, "\uE711", "Clear search", 0);
+        clearIcon.FontSize = 9;
+        clear.Width = 20;
+        clear.Height = 20;
+        clear.Margin = new Thickness(4, -2, 0, -2);
+        clear.Visibility = Visibility.Collapsed;
+        MakeButton(clear, delegate
+        {
+            historySearch.Text = "";
+            historySearch.Focus();
+        });
+
+        TextBlock hint = new TextBlock();
+        hint.Text = "Search chats";
+        hint.FontSize = 12;
+        hint.Foreground = WidgetWindow.Muted;
+        hint.IsHitTestVisible = false;
+        hint.VerticalAlignment = VerticalAlignment.Center;
+        hint.Margin = new Thickness(2, 0, 0, 0);
+
+        historySearch.FontSize = 12;
+        historySearch.Background = Brushes.Transparent;
+        historySearch.BorderThickness = new Thickness(0);
+        historySearch.Foreground = WidgetWindow.Text;
+        historySearch.CaretBrush = WidgetWindow.Text;
+        historySearch.FocusVisualStyle = null;
+        historySearch.VerticalContentAlignment = VerticalAlignment.Center;
+        historySearch.TextChanged += delegate
+        {
+            bool empty = historySearch.Text.Length == 0;
+            hint.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+            clear.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+            searchTimer.Stop();
+            searchTimer.Start();
+        };
+
+        Grid box = new Grid();
+        box.Children.Add(historySearch);
+        box.Children.Add(hint);
+
+        DockPanel line = new DockPanel();
+        line.Children.Add(icon);
+        line.Children.Add(clear);
+        line.Children.Add(box);
+
+        Border holder = new Border();
+        holder.Child = line;
+        holder.Margin = new Thickness(0, 8, 0, 0);
+        holder.Padding = new Thickness(10, 4, 6, 5);
+        holder.CornerRadius = new CornerRadius(8);
+        holder.Background = WidgetWindow.OverlaySoft;
+        holder.Cursor = Cursors.IBeam;
+        holder.MouseLeftButtonDown += delegate { historySearch.Focus(); };
+        return holder;
+    }
+
+    UIElement BuildRecentsLabel()
+    {
+        recentsLabel.Text = "Recents";
+        recentsLabel.FontSize = 11;
+        recentsLabel.FontWeight = FontWeights.SemiBold;
+        recentsLabel.Foreground = WidgetWindow.Muted;
+        recentsLabel.Margin = new Thickness(10, 16, 0, 5);
+        return recentsLabel;
     }
 
     // The same row shape for New chat and every saved chat.
@@ -3566,6 +3780,7 @@ class ChatWindow : Window
         int refresh = ++historyRefresh;
         if (historyFolder == null)
         {
+            historyEntries = null;
             ShowHistoryMessage("Chats aren't being saved, so there's no history.");
             return;
         }
@@ -3573,14 +3788,46 @@ class ChatWindow : Window
         string folder = historyFolder;
         List<ChatEntry> entries = await Task.Run(() => ReadHistory(folder));
         if (closed || refresh != historyRefresh) return;
+        historyEntries = entries;
+        ShowHistoryRows();
+    }
 
-        historyList.Children.Clear();
-        if (entries.Count == 0)
+    // Shows the saved chats, or only those matching the search box.
+    void ShowHistoryRows()
+    {
+        string query = historySearch.Text.Trim();
+        recentsLabel.Text = query.Length > 0 ? "Results" : "Recents";
+        if (historyEntries == null) return;
+        if (historyEntries.Count == 0)
         {
             ShowHistoryMessage("Your saved chats will appear here.");
             return;
         }
-        foreach (ChatEntry entry in entries) historyList.Children.Add(BuildHistoryRow(entry));
+
+        historyList.Children.Clear();
+        foreach (ChatEntry entry in historyEntries)
+        {
+            string snippet;
+            if (MatchesSearch(entry, query, out snippet)) historyList.Children.Add(BuildHistoryRow(entry, snippet));
+        }
+        if (historyList.Children.Count == 0) ShowHistoryMessage("No chats match your search.");
+    }
+
+    // Every word has to appear in the chat's name or messages. The snippet shows a word the name doesn't.
+    internal static bool MatchesSearch(ChatEntry entry, string query, out string snippet)
+    {
+        snippet = null;
+        foreach (string word in query.Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (entry.Title.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0) continue;
+            int found = entry.Text == null ? -1 : entry.Text.IndexOf(word, StringComparison.OrdinalIgnoreCase);
+            if (found < 0) return false;
+            if (snippet != null) continue;
+            int start = Math.Max(0, found - 12);
+            int length = Math.Min(entry.Text.Length - start, 110);
+            snippet = (start > 0 ? "\u2026" : "") + Regex.Replace(entry.Text.Substring(start, length), @"\s+", " ").Trim();
+        }
+        return true;
     }
 
     void ShowHistoryMessage(string message)
@@ -3613,6 +3860,9 @@ class ChatWindow : Window
                 entry.Path = note;
                 entry.Started = started;
                 entry.Title = title ?? TitleFrom(turns[0].Text);
+                StringBuilder words = new StringBuilder();
+                foreach (ChatTurn turn in turns) words.Append(turn.Text).Append('\n');
+                entry.Text = words.ToString();
                 entries.Add(entry);
             }
         }
@@ -3627,7 +3877,7 @@ class ChatWindow : Window
         return first.Length > 80 ? first.Substring(0, 80) : first;
     }
 
-    UIElement BuildHistoryRow(ChatEntry entry)
+    UIElement BuildHistoryRow(ChatEntry entry, string snippet)
     {
         TextBlock title = new TextBlock();
         title.Text = entry.Title;
@@ -3665,7 +3915,20 @@ class ChatWindow : Window
         line.ColumnDefinitions.Add(titleColumn);
         line.ColumnDefinitions.Add(actionColumn);
         Grid.SetColumn(actions, 1);
-        line.Children.Add(title);
+        if (snippet == null) line.Children.Add(title);
+        else
+        {
+            TextBlock found = new TextBlock();
+            found.Text = snippet;
+            found.FontSize = 11;
+            found.Foreground = WidgetWindow.Muted;
+            found.TextTrimming = TextTrimming.CharacterEllipsis;
+            found.Margin = new Thickness(0, 1, 0, 0);
+            StackPanel words = new StackPanel();
+            words.Children.Add(title);
+            words.Children.Add(found);
+            line.Children.Add(words);
+        }
         line.Children.Add(actions);
 
         bool current = noteWriter != null && string.Equals(noteWriter.NotePath, entry.Path, StringComparison.OrdinalIgnoreCase);
@@ -3768,9 +4031,11 @@ class ChatWindow : Window
 
     void ClearConversation()
     {
+        CancelEdit();
         turns.Clear();
         sent.Clear();
         bubbles.Clear();
+        replyTexts.Clear();
         messages.Children.Clear();
         chatFiles.Clear();
         cardRefreshers.Clear();
@@ -3828,10 +4093,21 @@ class ChatWindow : Window
         noteWriter.Title = customTitle;
         foreach (ChatTurn turn in turns)
         {
-            if (turn.Attachments.Count > 0) messages.Children.Add(BuildSentAttachments(turn.Attachments));
-            AddBubble(turn.Text, turn.FromUser);
-            foreach (string file in turn.CreatedFiles) messages.Children.Add(BuildFileCard(file));
+            if (turn.FromUser)
+            {
+                UIElement files = turn.Attachments.Count > 0 ? BuildSentAttachments(turn.Attachments) : null;
+                if (files != null) messages.Children.Add(files);
+                Border bubble = AddUserBubble(turn.Text, turn);
+                turn.First = files ?? (UIElement)bubble.Parent;
+            }
+            else
+            {
+                AddReplyBubble(turn.Text);
+                AddReplyActions(turn);
+                foreach (string file in turn.CreatedFiles) messages.Children.Add(BuildFileCard(file));
+            }
         }
+        UpdateReplyActions();
         chatTitle.Text = entry.Title;
         ShowSaveState(true);
         UpdateHistoryPanel();
@@ -3948,7 +4224,11 @@ class ChatWindow : Window
         retryButton.Cursor = Cursors.Hand;
         retryButton.VerticalAlignment = VerticalAlignment.Top;
         DockPanel.SetDock(retryButton, Dock.Right);
-        MakeButton(retryButton, delegate { Send(); });
+        MakeButton(retryButton, delegate
+        {
+            if (retryRegenerates) Regenerate();
+            else Send();
+        });
 
         statusText.FontSize = 12;
         statusText.TextWrapping = TextWrapping.Wrap;
@@ -3963,6 +4243,40 @@ class ChatWindow : Window
         statusRow.MaxWidth = ReadableWidth;
         statusRow.Visibility = Visibility.Collapsed;
         return statusRow;
+    }
+
+    UIElement BuildEditBanner()
+    {
+        TextBlock label = new TextBlock();
+        label.Text = "Cancel";
+        label.FontSize = 12;
+        label.FontWeight = FontWeights.SemiBold;
+        label.Foreground = WidgetWindow.Text;
+        Border cancel = new Border();
+        cancel.Child = label;
+        cancel.Padding = new Thickness(9, 3, 9, 4);
+        cancel.Margin = new Thickness(8, 0, 0, 0);
+        cancel.CornerRadius = new CornerRadius(11);
+        cancel.Background = WidgetWindow.OverlayMid;
+        cancel.Cursor = Cursors.Hand;
+        cancel.VerticalAlignment = VerticalAlignment.Top;
+        cancel.ToolTip = "Stop editing and keep this chat as it is";
+        DockPanel.SetDock(cancel, Dock.Right);
+        MakeButton(cancel, CancelEdit);
+
+        editBannerText.FontSize = 12;
+        editBannerText.TextWrapping = TextWrapping.Wrap;
+        editBannerText.VerticalAlignment = VerticalAlignment.Center;
+        editBannerText.Foreground = WidgetWindow.Muted;
+
+        DockPanel row = new DockPanel();
+        row.Children.Add(cancel);
+        row.Children.Add(editBannerText);
+        editBanner.Child = row;
+        editBanner.Margin = new Thickness(0, 8, 0, 0);
+        editBanner.MaxWidth = ReadableWidth;
+        editBanner.Visibility = Visibility.Collapsed;
+        return editBanner;
     }
 
     UIElement BuildComposer()
@@ -4568,7 +4882,11 @@ class ChatWindow : Window
     long AttachedBytes()
     {
         long total = 0;
-        foreach (ChatAttachment attachment in sent) total += SentSize(attachment);
+        foreach (ChatAttachment attachment in sent)
+        {
+            // Editing a message puts its files back in the box while they still count as sent.
+            if (!pending.Contains(attachment)) total += SentSize(attachment);
+        }
         foreach (ChatAttachment attachment in pending) total += SentSize(attachment);
         return total;
     }
@@ -5010,6 +5328,16 @@ class ChatWindow : Window
             titlePopup.IsOpen = false;
             return;
         }
+        if (historySearch.IsKeyboardFocused && historySearch.Text.Length > 0)
+        {
+            historySearch.Text = "";
+            return;
+        }
+        if (editingTurn != null && !busy)
+        {
+            CancelEdit();
+            return;
+        }
         if (busy) StopRequest();
         else if (WindowState == WindowState.Maximized) WindowState = WindowState.Normal;
         else if (input.Text.Length == 0 && bubbles.Count == 0) Close();
@@ -5046,6 +5374,13 @@ class ChatWindow : Window
             userFill.Color = WidgetWindow.Hex(light ? "#17000000" : "#2EFFFFFF");
             sendFill.Color = WidgetWindow.Hex(light ? "#1C1C1E" : "#F2F2F0");
             sendGlyph.Color = WidgetWindow.Hex(light ? "#FFFFFF" : "#141518");
+        }
+
+        // Reply colors are set when a reply is drawn, so a new theme draws them again.
+        if (repliesDrawnLight != light)
+        {
+            repliesDrawnLight = light;
+            foreach (Border reply in new List<Border>(replyTexts.Keys)) RenderReply(reply, replyTexts[reply]);
         }
     }
 
@@ -5096,7 +5431,7 @@ class ChatWindow : Window
             return;
         }
         TimeSpan elapsed = DateTime.Now - workingSince;
-        ShowStatus(string.Format(CultureInfo.InvariantCulture, "Working… {0}:{1:00}", (int)elapsed.TotalMinutes, elapsed.Seconds), false, false);
+        ShowStatus(string.Format(CultureInfo.InvariantCulture, "{0}\u2026 {1}:{2:00}", activity ?? "Working", (int)elapsed.TotalMinutes, elapsed.Seconds), false, false);
         statusSpark.Visibility = Visibility.Visible;
     }
 
@@ -5117,8 +5452,11 @@ class ChatWindow : Window
     void SetBusy(bool value)
     {
         busy = value;
+        UpdateReplyActions();
+        UpdateEditBanner();
         if (busy)
         {
+            activity = null;
             workingSince = DateTime.Now;
             ShowWorking();
             workingTimer.Start();
@@ -5205,26 +5543,60 @@ class ChatWindow : Window
     async void Send()
     {
         if (busy) return;
-        FileVersions.Capture(chatFiles);
         string message = input.Text.Trim();
         if (message.Length == 0 && pending.Count == 0) return;
         if (message.Length == 0) message = "Please look at what I attached.";
+        int from = editingTurn != null ? turns.IndexOf(editingTurn) : -1;
+        await Submit(message, new List<ChatAttachment>(pending), from, false);
+    }
 
-        List<ChatAttachment> attaching = new List<ChatAttachment>(pending);
+    // Asks for a new answer to the last message, using the model and effort chosen now.
+    async void Regenerate()
+    {
+        if (busy)
+        {
+            ShowStatus("Wait for this reply or stop it first.", false, false);
+            return;
+        }
+        int from = turns.Count - 2;
+        if (from < 0 || !turns[from].FromUser) return;
+        CancelEdit();
+        ChatTurn asked = turns[from];
+        await Submit(asked.Text, new List<ChatAttachment>(asked.Attachments), from, true);
+    }
+
+    // With from at a turn, that turn and everything after it are replaced once the new reply arrives.
+    // Until then nothing is saved, and a failure puts the chat back as it was.
+    async Task Submit(string message, List<ChatAttachment> attaching, int from, bool regenerating)
+    {
+        retryRegenerates = false;
+        FileVersions.Capture(chatFiles);
+        ChatRewind rewind = from >= 0 ? RewindTo(from) : null;
+        activeRewind = rewind;
         string prompt = BuildPrompt(message, attaching);
         if (prompt.Length > ConversationLimit)
         {
+            activeRewind = null;
+            if (rewind != null) RestoreRewind(rewind);
             ShowStatus("This chat is too long to continue. Open a new chat, which can still find this one once it's saved.", true, false);
             return;
         }
 
-        input.Text = "";
-        pending.Clear();
-        RefreshChips();
+        if (!regenerating)
+        {
+            input.Text = "";
+            pending.Clear();
+            RefreshChips();
+        }
         followLatest = true;
+        ChatTurn asked = new ChatTurn();
+        asked.FromUser = true;
+        asked.Text = message;
+        asked.Attachments = attaching;
         UIElement sentFiles = attaching.Count > 0 ? BuildSentAttachments(attaching) : null;
         if (sentFiles != null) messages.Children.Add(sentFiles);
-        Border bubble = AddBubble(message, true);
+        Border bubble = AddUserBubble(message, asked);
+        asked.First = sentFiles ?? (UIElement)bubble.Parent;
 
         ChatRequest request = new ChatRequest();
         request.Prompt = prompt;
@@ -5246,36 +5618,55 @@ class ChatWindow : Window
         }
 
         client = new ChatClient();
+        client.ReplyText = OnLiveText;
+        client.ReplyRestarted = delegate
+        {
+            liveRestarted = true;
+            liveText = "";
+            liveTimer.Interval = TimeSpan.FromMilliseconds(80);
+        };
+        client.Activity = OnActivity;
         SetBusy(true);
         ChatResult result = await client.Ask(request, AskApproval);
         client = null;
+        activeRewind = null;
         if (closed) return;
+        bool streamed = liveBubble != null;
+        ClearLiveReply();
         SetBusy(false);
 
         if (result.Outcome == ChatOutcome.Reply)
         {
             RememberModelVersion(result.Model);
-            ChatTurn asked = new ChatTurn();
-            asked.FromUser = true;
-            asked.Text = message;
-            asked.Attachments = attaching;
             sent.AddRange(attaching);
             ChatTurn answered = new ChatTurn();
             answered.Text = result.Text;
             answered.Detail = " (" + (result.Model ?? "default model") + (effortChoice.Length > 0 ? ", " + effortChoice + " effort" : "") + ")";
             turns.Add(asked);
             turns.Add(answered);
-            AddBubble(result.Text, false);
+            AddReplyBubble(result.Text);
+            AddReplyActions(answered);
             AdoptNewOutputFolder(requestStart);
             answered.CreatedFiles = FindCreatedFiles(requestStart, request.Written);
-            followLatest = true;
+
+            // Someone reading further up a reply as it arrived stays where they are.
+            if (!streamed) followLatest = true;
             FileVersions.Capture(answered.CreatedFiles);
             foreach (string file in answered.CreatedFiles)
             {
                 RefreshCards(file);
                 messages.Children.Add(BuildFileCard(file));
             }
-            if (chatTitle.Text == "New chat" && turns.Count == 2) chatTitle.Text = TitleFrom(turns[0].Text);
+            UpdateReplyActions();
+            FinishEdit();
+            if (turns.Count == 2 && (noteWriter == null || noteWriter.Title == null)) chatTitle.Text = TitleFrom(turns[0].Text);
+            if (rewind != null)
+            {
+                foreach (Border old in new List<Border>(replyTexts.Keys))
+                {
+                    if (!bubbles.Contains(old)) replyTexts.Remove(old);
+                }
+            }
             if (noteWriter != null)
             {
                 ShowSaveState(noteWriter.Save(turns));
@@ -5284,26 +5675,192 @@ class ChatWindow : Window
         }
         else
         {
-            if (sentFiles != null) messages.Children.Remove(sentFiles);
-            RemoveBubble(bubble);
-            pending.InsertRange(0, attaching);
-            RefreshChips();
-            input.Text = input.Text.Length == 0 ? message : message + "\n" + input.Text;
-            input.CaretIndex = input.Text.Length;
-            input.Focus();
-            ShowOutcome(result.Outcome);
+            if (rewind != null)
+            {
+                int first = messages.Children.IndexOf(asked.First);
+                if (first >= 0) messages.Children.RemoveRange(first, messages.Children.Count - first);
+                bubbles.Remove(bubble);
+                RestoreRewind(rewind);
+            }
+            else
+            {
+                if (sentFiles != null) messages.Children.Remove(sentFiles);
+                RemoveBubble(bubble);
+            }
+
+            if (regenerating) retryRegenerates = true;
+            else
+            {
+                pending.InsertRange(0, attaching);
+                RefreshChips();
+                input.Text = input.Text.Length == 0 ? message : message + "\n" + input.Text;
+                input.CaretIndex = input.Text.Length;
+                input.Focus();
+            }
+            ShowOutcome(result.Outcome, regenerating ? "The earlier reply is still here." : rewind != null ? "Your edit is back in the box." : "Your message is back in the box.");
         }
     }
 
-    void ShowOutcome(ChatOutcome outcome)
+    ChatRewind RewindTo(int index)
+    {
+        ChatRewind rewind = new ChatRewind();
+        rewind.Turns = turns.GetRange(index, turns.Count - index);
+        rewind.Sent = new List<ChatAttachment>(sent);
+        rewind.Bubbles = new List<Border>(bubbles);
+        rewind.Files = new List<string>(chatFiles);
+
+        int first = messages.Children.IndexOf(turns[index].First);
+        if (first >= 0)
+        {
+            for (int i = first; i < messages.Children.Count; i++) rewind.Elements.Add(messages.Children[i]);
+            messages.Children.RemoveRange(first, messages.Children.Count - first);
+        }
+        turns.RemoveRange(index, turns.Count - index);
+        foreach (ChatTurn turn in rewind.Turns)
+        {
+            foreach (ChatAttachment attachment in turn.Attachments) sent.Remove(attachment);
+        }
+        bubbles.RemoveAll(b => rewind.Elements.Contains(b) || rewind.Elements.Contains(b.Parent as UIElement));
+        chatFiles.RemoveAll(file => !turns.Exists(turn => turn.CreatedFiles.Exists(made => string.Equals(made, file, StringComparison.OrdinalIgnoreCase))));
+        return rewind;
+    }
+
+    void RestoreRewind(ChatRewind rewind)
+    {
+        turns.AddRange(rewind.Turns);
+        foreach (UIElement element in rewind.Elements) messages.Children.Add(element);
+        sent.Clear();
+        sent.AddRange(rewind.Sent);
+        bubbles.Clear();
+        bubbles.AddRange(rewind.Bubbles);
+        chatFiles.Clear();
+        chatFiles.AddRange(rewind.Files);
+        emptyState.Visibility = Visibility.Collapsed;
+        UpdateBubbleWidths();
+        UpdateReplyActions();
+        UpdateEditBanner();
+    }
+
+    // Only the newest reply can be regenerated, and nothing can while Claude is working.
+    void UpdateReplyActions()
+    {
+        for (int i = 0; i < turns.Count; i++)
+        {
+            if (turns[i].Regenerate == null) continue;
+            turns[i].Regenerate.Visibility = i == turns.Count - 1 && !busy ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    void StartEdit(ChatTurn turn)
+    {
+        if (busy)
+        {
+            ShowStatus("Wait for this reply or stop it first.", false, false);
+            return;
+        }
+        if (!turns.Contains(turn)) return;
+        if (editingTurn == null)
+        {
+            editDraft = input.Text;
+            editDraftFiles = new List<ChatAttachment>(pending);
+        }
+        editingTurn = turn;
+        pending.Clear();
+        pending.AddRange(turn.Attachments);
+        RefreshChips();
+        input.Text = turn.Text;
+        input.CaretIndex = input.Text.Length;
+        HideStatus();
+        UpdateEditBanner();
+        input.Focus();
+    }
+
+    // Whatever was being typed before editing comes back.
+    void CancelEdit()
+    {
+        if (editingTurn == null) return;
+        editingTurn = null;
+        input.Text = editDraft ?? "";
+        input.CaretIndex = input.Text.Length;
+        pending.Clear();
+        if (editDraftFiles != null) pending.AddRange(editDraftFiles);
+        RefreshChips();
+        UpdateEditBanner();
+        input.Focus();
+    }
+
+    void FinishEdit()
+    {
+        if (editingTurn == null) return;
+        editingTurn = null;
+        if (!string.IsNullOrEmpty(editDraft)) input.Text = input.Text.Length == 0 ? editDraft : editDraft + "\n" + input.Text;
+        input.CaretIndex = input.Text.Length;
+        if (editDraftFiles != null) pending.InsertRange(0, editDraftFiles);
+        RefreshChips();
+        UpdateEditBanner();
+    }
+
+    void UpdateEditBanner()
+    {
+        bool show = editingTurn != null && !busy;
+        editBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (!show) return;
+        editBannerText.Text = turns.IndexOf(editingTurn) == turns.Count - 2
+            ? "Editing your message. Sending replaces it and Claude's reply."
+            : "Editing an earlier message. Sending replaces it and everything after it.";
+    }
+
+    void OnLiveText(string text)
+    {
+        liveText = text;
+        if (!liveTimer.IsEnabled) liveTimer.Start();
+    }
+
+    void OnActivity(string text)
+    {
+        if (closed) return;
+        activity = text;
+        ShowWorking();
+    }
+
+    // A long reply takes longer to draw, so it's drawn less often.
+    void ShowLiveText()
+    {
+        liveTimer.Stop();
+        if (closed || !busy || string.IsNullOrEmpty(liveText)) return;
+        if (liveRestarted && liveBubble != null)
+        {
+            RemoveBubble(liveBubble);
+            liveBubble = null;
+        }
+        liveRestarted = false;
+
+        Stopwatch drawing = Stopwatch.StartNew();
+        if (liveBubble == null) liveBubble = AddReplyBubble(liveText);
+        else RenderReply(liveBubble, liveText);
+        messages.UpdateLayout();
+        liveTimer.Interval = TimeSpan.FromMilliseconds(Math.Min(5000, Math.Max(80, drawing.ElapsedMilliseconds * 3)));
+    }
+
+    void ClearLiveReply()
+    {
+        liveTimer.Stop();
+        liveTimer.Interval = TimeSpan.FromMilliseconds(80);
+        if (liveBubble != null) RemoveBubble(liveBubble);
+        liveBubble = null;
+        liveText = null;
+        liveRestarted = false;
+    }
+
+    void ShowOutcome(ChatOutcome outcome, string kept)
     {
         switch (outcome)
         {
             case ChatOutcome.Stopped:
-                ShowStatus("Stopped. Your message is back in the box.", false, true);
+                ShowStatus("Stopped. " + kept, false, true);
                 break;
             case ChatOutcome.TimedOut:
-                ShowStatus("No reply after 5 minutes. Your message is back in the box.", true, true);
+                ShowStatus("No reply after 5 minutes. " + kept, true, true);
                 break;
             case ChatOutcome.NotFound:
                 ShowStatus("Claude Code wasn't found. Install it, then try again.", true, true);
@@ -5315,7 +5872,7 @@ class ChatWindow : Window
                 ShowStatus("Your usage limit has been reached. Try again after it resets.", true, true);
                 break;
             default:
-                ShowStatus("Claude couldn't answer. Your message is back in the box.", true, true);
+                ShowStatus("Claude couldn't answer. " + kept, true, true);
                 break;
         }
     }
@@ -5882,7 +6439,22 @@ class ChatWindow : Window
         input.Focus();
     }
 
-    Border AddBubble(string text, bool fromUser)
+    Border NewBubble(bool fromUser)
+    {
+        Border bubble = new Border();
+        bubble.Padding = new Thickness(10, 7, 10, 8);
+        bubble.CornerRadius = fromUser ? new CornerRadius(14, 14, 4, 14) : new CornerRadius(14, 14, 14, 4);
+        bubble.Background = fromUser ? (Brush)userFill : WidgetWindow.OverlaySoft;
+        bubble.HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        bubble.Margin = new Thickness(0, 0, 0, 6);
+        bubble.MaxWidth = BubbleWidth();
+        bubbles.Add(bubble);
+        emptyState.Visibility = Visibility.Collapsed;
+        return bubble;
+    }
+
+    // The edit icon shows while the message is hovered or has keyboard focus.
+    Border AddUserBubble(string text, ChatTurn turn)
     {
         TextBox content = new TextBox();
         content.Text = text;
@@ -5897,36 +6469,295 @@ class ChatWindow : Window
         content.FocusVisualStyle = null;
         content.Padding = new Thickness(0);
 
-        Border bubble = new Border();
+        Border bubble = NewBubble(true);
         bubble.Child = content;
-        bubble.Padding = new Thickness(10, 7, 10, 8);
-        bubble.CornerRadius = fromUser ? new CornerRadius(14, 14, 4, 14) : new CornerRadius(14, 14, 14, 4);
-        bubble.Background = fromUser ? (Brush)userFill : WidgetWindow.OverlaySoft;
-        bubble.HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-        bubble.Margin = new Thickness(0, 0, 0, 6);
-        bubble.MaxWidth = BubbleWidth();
-        bubbles.Add(bubble);
-        messages.Children.Add(bubble);
-        if (!fromUser) messages.Children.Add(BuildCopyButton(text));
-        emptyState.Visibility = Visibility.Collapsed;
+
+        Border edit = new Border();
+        TextBlock icon = new TextBlock();
+        WidgetWindow.BuildHeaderButton(edit, icon, "\uE70F", "Edit message", 0);
+        icon.FontSize = 12;
+        edit.Margin = new Thickness(0, 0, 2, 6);
+        edit.VerticalAlignment = VerticalAlignment.Center;
+        edit.Opacity = 0;
+        MakeButton(edit, delegate { StartEdit(turn); });
+
+        StackPanel row = new StackPanel();
+        row.Orientation = Orientation.Horizontal;
+        row.HorizontalAlignment = HorizontalAlignment.Right;
+        row.Background = Brushes.Transparent;
+        row.Children.Add(edit);
+        row.Children.Add(bubble);
+        Action showEdit = delegate { edit.Opacity = row.IsMouseOver || row.IsKeyboardFocusWithin ? 1 : 0; };
+        row.MouseEnter += delegate { showEdit(); };
+        row.MouseLeave += delegate { showEdit(); };
+        row.IsKeyboardFocusWithinChanged += delegate { showEdit(); };
+        messages.Children.Add(row);
         return bubble;
+    }
+
+    Border AddReplyBubble(string text)
+    {
+        Border bubble = NewBubble(false);
+        RenderReply(bubble, text);
+        messages.Children.Add(bubble);
+        return bubble;
+    }
+
+    // Formats a reply. Its saved text stays as Claude wrote it.
+    void RenderReply(Border bubble, string text)
+    {
+        replyTexts[bubble] = text;
+        TextColors colors = new TextColors(WidgetWindow.IsLight, false);
+        colors.Compact = true;
+        colors.OpenLink = OpenWebLink;
+        colors.BuildCode = BuildCodeBlock;
+
+        FlowDocument document;
+        try { document = DocumentBuilder.Markdown(text, colors); }
+        catch (Exception)
+        {
+            // Reply text is untrusted, and no reply is worth losing the widget and its other chats.
+            document = new FlowDocument(new Paragraph(new Run(text)));
+            document.Foreground = WidgetWindow.Text;
+        }
+        document.PagePadding = new Thickness(0);
+        document.FontFamily = FontFamily;
+        document.FontSize = 13;
+        Block last = document.Blocks.LastBlock;
+        if (last != null) last.Margin = new Thickness(last.Margin.Left, last.Margin.Top, last.Margin.Right, 0);
+
+        RichTextBox content = bubble.Child as RichTextBox;
+        if (content == null)
+        {
+            content = NewReadOnlyText();
+            bubble.Child = content;
+        }
+        content.Document = document;
+        bubble.Width = ReplyWidth(text);
+    }
+
+    // IsDocumentEnabled lets links and the buttons on code blocks work inside read-only text.
+    static RichTextBox NewReadOnlyText()
+    {
+        RichTextBox content = new RichTextBox();
+        content.IsReadOnly = true;
+        content.IsDocumentEnabled = true;
+        content.IsTabStop = false;
+        content.Background = Brushes.Transparent;
+        content.BorderThickness = new Thickness(0);
+        content.Foreground = WidgetWindow.Text;
+        content.CaretBrush = Brushes.Transparent;
+        content.FocusVisualStyle = null;
+        content.Padding = new Thickness(0);
+        DataObject.AddCopyingHandler(content, CopyPlainText);
+        return content;
+    }
+
+    // Formatted copies would carry this window's colors, such as white text, into other apps.
+    static void CopyPlainText(object sender, DataObjectCopyingEventArgs e)
+    {
+        e.CancelCommand();
+        string text = SelectedText((RichTextBox)sender);
+        if (text.Length == 0) return;
+        try { Clipboard.SetText(text); }
+        catch (System.Runtime.InteropServices.ExternalException) { }
+    }
+
+    // Code blocks hold their text in a box of their own, which a selection around them doesn't include.
+    static string SelectedText(RichTextBox box)
+    {
+        TextSelection selection = box.Selection;
+        List<Block> covered = new List<Block>();
+        bool hasCode = false;
+        foreach (Block block in box.Document.Blocks)
+        {
+            if (selection.Start.CompareTo(block.ContentEnd) >= 0 || selection.End.CompareTo(block.ContentStart) <= 0) continue;
+            covered.Add(block);
+            if (block is BlockUIContainer) hasCode = true;
+        }
+        if (!hasCode) return selection.Text;
+
+        StringBuilder text = new StringBuilder();
+        foreach (Block block in covered)
+        {
+            if (text.Length > 0) text.Append("\r\n");
+            if (block is BlockUIContainer)
+            {
+                text.Append(block.Tag as string).Append("\r\n");
+                continue;
+            }
+            TextPointer start = selection.Start.CompareTo(block.ContentStart) > 0 ? selection.Start : block.ContentStart;
+            TextPointer end = selection.End.CompareTo(block.ContentEnd) < 0 ? selection.End : block.ContentEnd;
+            text.Append(new TextRange(start, end).Text.TrimEnd());
+            text.Append("\r\n");
+        }
+        return text.ToString().TrimEnd();
+    }
+
+    // Only runs when the link is clicked, and only for addresses DocumentBuilder.IsWebLink accepted.
+    static void OpenWebLink(string address)
+    {
+        try
+        {
+            ProcessStartInfo start = new ProcessStartInfo(new Uri(address).AbsoluteUri);
+            start.UseShellExecute = true;
+            Process.Start(start);
+        }
+        catch (System.ComponentModel.Win32Exception) { }
+        catch (InvalidOperationException) { }
+        catch (UriFormatException) { }
+    }
+
+    Block BuildCodeBlock(string code, string language)
+    {
+        TextColors colors = new TextColors(WidgetWindow.IsLight, false);
+        Paragraph paragraph = new Paragraph();
+        paragraph.Margin = new Thickness(0);
+        CodeColorer.Fill(paragraph, code, "." + DocumentBuilder.LanguageExtension(language), colors);
+
+        string longest = "";
+        foreach (string line in code.Split('\n'))
+        {
+            if (line.Length > longest.Length) longest = line;
+        }
+        FormattedText measured = new FormattedText(longest.Replace("\t", "    "), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            new Typeface("Consolas"), 12, Brushes.Black);
+
+        // Code doesn't wrap. A long line scrolls inside the block.
+        FlowDocument document = new FlowDocument(paragraph);
+        document.FontFamily = new FontFamily("Consolas");
+        document.FontSize = 12;
+        document.Foreground = new SolidColorBrush(colors.Text);
+        document.PagePadding = new Thickness(0);
+        document.PageWidth = measured.WidthIncludingTrailingWhitespace + 12;
+
+        RichTextBox box = NewReadOnlyText();
+        box.Document = document;
+        box.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+        box.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+        box.Margin = new Thickness(10, 0, 10, 8);
+
+        TextBlock name = new TextBlock();
+        name.Text = language;
+        name.FontSize = 11;
+        name.Foreground = WidgetWindow.Muted;
+        name.VerticalAlignment = VerticalAlignment.Center;
+
+        TextBlock copyLabel = new TextBlock();
+        copyLabel.Text = "Copy";
+        copyLabel.FontSize = 11;
+        copyLabel.Foreground = WidgetWindow.Muted;
+        Border copy = new Border();
+        copy.Child = copyLabel;
+        copy.Padding = new Thickness(7, 1, 7, 2);
+        copy.CornerRadius = new CornerRadius(6);
+        copy.Background = Brushes.Transparent;
+        copy.Cursor = Cursors.Hand;
+        copy.ToolTip = "Copy code";
+        copy.MouseEnter += delegate { copy.Background = WidgetWindow.OverlayMid; };
+        copy.MouseLeave += delegate { copy.Background = Brushes.Transparent; };
+        MakeButton(copy, delegate
+        {
+            try
+            {
+                Clipboard.SetText(code);
+                copyLabel.Text = "Copied";
+                DispatcherTimer restore = new DispatcherTimer();
+                restore.Interval = TimeSpan.FromSeconds(1.5);
+                restore.Tick += delegate
+                {
+                    restore.Stop();
+                    copyLabel.Text = "Copy";
+                };
+                restore.Start();
+            }
+            catch (System.Runtime.InteropServices.ExternalException) { }
+        });
+        DockPanel.SetDock(copy, Dock.Right);
+
+        DockPanel top = new DockPanel();
+        top.Margin = new Thickness(10, 4, 5, 3);
+        top.Children.Add(copy);
+        top.Children.Add(name);
+
+        StackPanel stack = new StackPanel();
+        stack.Children.Add(top);
+        stack.Children.Add(box);
+
+        Border holder = new Border();
+        holder.Child = stack;
+        holder.CornerRadius = new CornerRadius(8);
+        holder.Background = new SolidColorBrush(colors.CodeFill);
+        holder.FlowDirection = FlowDirection.LeftToRight;
+
+        BlockUIContainer block = new BlockUIContainer(holder);
+        block.Margin = new Thickness(0, 2, 0, 10);
+        block.Tag = code;
+        return block;
+    }
+
+    // Rich text doesn't size itself to its words, so short replies are measured to keep a small bubble.
+    double ReplyWidth(string text)
+    {
+        const double Wide = 10000;
+        double widest = 0;
+        Typeface face = new Typeface(FontFamily, FontStyles.Normal, FontWeights.SemiBold, FontStretches.Normal);
+        foreach (string line in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            string start = line.TrimStart();
+            if (start.StartsWith("```") || start.StartsWith("~~~") || start.Contains("|")) return Wide;
+            double size = start.StartsWith("#") ? 17 : 13;
+            FormattedText measured = new FormattedText(line, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, face, size, Brushes.Black);
+            double width = measured.WidthIncludingTrailingWhitespace;
+            if (line.Contains("`"))
+            {
+                FormattedText code = new FormattedText(line, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Consolas"), size, Brushes.Black);
+                width = Math.Max(width, code.WidthIncludingTrailingWhitespace);
+            }
+            width += Regex.IsMatch(start, @"^([-*+]|\d+[.)])\s|^>") ? 26 : 0;
+            if (width > widest) widest = width;
+        }
+        return Math.Min(Wide, widest + 30);
     }
 
     void RemoveBubble(Border bubble)
     {
         bubbles.Remove(bubble);
-        messages.Children.Remove(bubble);
+        replyTexts.Remove(bubble);
+        messages.Children.Remove(bubble.Parent == messages ? (UIElement)bubble : (UIElement)bubble.Parent);
         if (messages.Children.Count == 0) emptyState.Visibility = Visibility.Visible;
     }
 
-    UIElement BuildCopyButton(string text)
+    // Copy on every reply, and Regenerate on the newest one.
+    void AddReplyActions(ChatTurn turn)
+    {
+        Border copy = BuildCopyButton(turn.Text);
+        copy.Margin = new Thickness(0);
+
+        Border regenerate = new Border();
+        TextBlock icon = new TextBlock();
+        WidgetWindow.BuildHeaderButton(regenerate, icon, "\uE72C", "Regenerate reply", 0);
+        icon.FontSize = 12;
+        regenerate.Margin = new Thickness(0);
+        MakeButton(regenerate, Regenerate);
+        turn.Regenerate = regenerate;
+
+        StackPanel row = new StackPanel();
+        row.Orientation = Orientation.Horizontal;
+        row.HorizontalAlignment = HorizontalAlignment.Left;
+        row.Margin = new Thickness(0, -3, 0, 8);
+        row.Children.Add(copy);
+        row.Children.Add(regenerate);
+        messages.Children.Add(row);
+    }
+
+    Border BuildCopyButton(string text)
     {
         Border button = new Border();
         TextBlock icon = new TextBlock();
         WidgetWindow.BuildHeaderButton(button, icon, "", "Copy reply", 0);
         icon.FontSize = 12;
         button.HorizontalAlignment = HorizontalAlignment.Left;
-        button.Margin = new Thickness(0, -3, 0, 8);
         MakeButton(button, delegate
         {
             try
@@ -5962,6 +6793,8 @@ class ChatWindow : Window
     {
         closed = true;
         workingTimer.Stop();
+        liveTimer.Stop();
+        searchTimer.Stop();
         WidgetWindow.AppearanceChanged -= ApplyAppearance;
         ClosePreviewPanel();
         Open.Remove(this);

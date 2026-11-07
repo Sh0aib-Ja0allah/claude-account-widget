@@ -17,7 +17,7 @@ This is an early pre-release, so expect some rough edges.
 - **Appearance:** follows the Windows light or dark theme, with six ring colors.
 - **App icon:** shows the Claude spark in the taskbar and on the app file.
 - **Alert colors:** turns amber at 70% and red at 90%, whichever ring color you choose.
-- **New chat:** opens chat windows that use your Claude Code sign-in, save to a folder you choose and can look back at earlier saved chats.
+- **New chat:** opens chat windows that use your Claude Code sign-in, show formatted replies as they're written, save to a folder you choose and can look back at earlier saved chats.
 
 ## Requirements
 
@@ -66,7 +66,19 @@ Always on top starts on, and Start with Windows starts off.
 
 Press Enter to send and Shift+Enter for a new line. While Claude is working, the send button becomes Stop, and Esc does the same. To minimize a chat, click the **-** icon. To fill the screen, click the extend icon next to the close button or double-click the header. Click it again or press Esc to go back.
 
-**Chat history:** in full screen, a sidebar lists your saved chats under **Recents**, newest first. Click a chat to continue it, or click **New chat** to start fresh. To rename the open chat, click its name at the top and choose **Rename**. To delete a chat, choose **Delete** there, or hover over it in the list and click the trash icon, then confirm. Its note moves to the Windows Recycle Bin, and Claude can no longer recall it. The menu icon hides the sidebar, and another appears beside the chat title to bring it back. A reopened chat keeps its messages, but attached files show as no longer attached, so add them again to keep working on them. Replies are plain text that you can select or copy. By default, Claude can only read your chat history folder and what you attach. It can't run commands or change files unless you turn on laptop access.
+**Chat history:** in full screen, a sidebar lists your saved chats under **Recents**, newest first. Click a chat to continue it, or click **New chat** to start fresh. To rename the open chat, click its name at the top and choose **Rename**. To delete a chat, choose **Delete** there, or hover over it in the list and click the trash icon, then confirm. Its note moves to the Windows Recycle Bin, and Claude can no longer recall it. The menu icon hides the sidebar, and another appears beside the chat title to bring it back. A reopened chat keeps its messages, but attached files show as no longer attached, so add them again to keep working on them. By default, Claude can only read your chat history folder and what you attach. It can't run commands or change files unless you turn on laptop access.
+
+**Search:** in full screen, the box above **Recents** searches the name and message text of your newest 300 saved chats. A chat must match every word you type. Press Esc to clear the search.
+
+**Replies:** Claude's replies are formatted, with headings, lists, tables and code blocks, and appear as they're written. The status line says what Claude is doing, such as reading a file or searching the web. Text Claude writes before using a tool can be replaced as it carries on, and the final reply is the one that's saved.
+
+- Links open in your browser only when you click them, and only `http` and `https` addresses work. Hover over a link to see its real address.
+- Pictures in a reply aren't loaded.
+- Code blocks have their own **Copy** button, and the copy icon under a reply copies all of it.
+
+**Regenerate:** the regenerate icon under the newest reply asks for a new answer, using the model and effort chosen now. If the new request fails or you stop it, the earlier reply stays.
+
+**Edit a message:** hover over your message or move keyboard focus to it, then click the pencil. Its text and attachments move to the message box. Sending replaces that message and everything after it, in the chat and in its note. Files Claude already made stay in the output folder. Press Esc or click **Cancel** to keep the chat as it was. If the request fails or you stop it, the chat also stays as it was and your edit goes back in the box.
 
 **Attachments:** click **+** and choose **Files and images** or **Folder**, drag them onto the window, or press Ctrl+V to paste a screenshot.
 
@@ -94,7 +106,7 @@ Press Ctrl+F to search. Select words to copy them or send them to the chat with 
 
 The preview updates when the file changes. Each change is kept as a version you can view or compare, in a `file-versions` folder next to the app, never in your chat history folder. It keeps the last 20 versions of each file, for files up to 50 MB. Converted pages and thumbnails stay in a temp folder so files reopen quickly, and are removed after two weeks or when they pass 500 MB.
 
-**Model and effort:** under the message box, pick a model from the menu. To set the effort, click the effort button and then a dot, from Low on the left to Max on the right. The current dot matches the widget's ring color. Each model option always uses that model's latest version. The menu shows the newest version number the widget has seen, so a new version's number appears after your first reply from it. Chats start on Opus with Medium effort. A change applies from your next message, and new windows start with your last choice. Higher effort and larger models use more of your plan.
+**Model and effort:** under the message box, pick a model from the menu. To set the effort, click the effort button and then a dot, from Low on the left to Max on the right. The current dot matches the widget's ring color. Each model option always uses that model's latest version. The menu shows the newest version number the widget has seen, so a new version's number appears after your first reply from it. Chats start on Opus with Medium effort. A change applies from your next message or regenerated reply, and new windows start with your last choice. Higher effort and larger models use more of your plan.
 
 Each window sends its whole conversation with every message. To remember other chats, Claude can search and read the notes in your chat history folder, so:
 
