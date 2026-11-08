@@ -253,7 +253,7 @@ The file preview tests need Python with `reportlab`, `python-pptx`, `openpyxl` a
 
 ## Releasing a new version
 
-Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.0`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none. Build the exe for the release with `build.ps1 -OutDir` from a clean copy of the tagged commit, not your working folder, and put its SHA-256 in the release notes. The update notice reads pre-releases too.
+Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.1`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none. Build the exe for the release with `build.ps1 -OutDir` from a clean copy of the tagged commit, not your working folder, and put its SHA-256 in the release notes. The update notice reads pre-releases too.
 
 ## License
 
