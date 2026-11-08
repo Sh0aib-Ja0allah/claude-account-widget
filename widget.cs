@@ -353,9 +353,16 @@ static class UpdateClient
     }
 
     // https on github.com, under this repo's releases, with nothing that could lead elsewhere.
+    // The exact shape of a release page: no spaces anywhere, no ; or other punctuation, and no empty or dot-only
+    // path segments. The host may be in any case and may carry the default :443.
+    static readonly Regex ReleaseLinkShape = new Regex(
+        @"^https://github\.com(?::443)?/" + Regex.Escape(Repo) + @"/releases(?:/[A-Za-z0-9_~+-][A-Za-z0-9._~+-]*)+\z",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     internal static bool IsReleaseLink(string link)
     {
-        if (link == null || link.Length == 0 || link.Length > 300 || !DocumentBuilder.IsWebLink(link)) return false;
+        if (link == null || link.Length == 0 || link.Length > 300 || link != link.Trim() || !ReleaseLinkShape.IsMatch(link)) return false;
+        if (!DocumentBuilder.IsWebLink(link)) return false;
         if (link.IndexOf("..", StringComparison.Ordinal) >= 0 || link.IndexOf('%') >= 0 || link.IndexOf('\\') >= 0) return false;
         Uri uri;
         if (!Uri.TryCreate(link, UriKind.Absolute, out uri)) return false;
