@@ -158,7 +158,7 @@ Each setting is a text file in the folder where the widget is installed, so you 
 
 **Usage alerts:** off until you turn them on in Settings, which stores the choice in `settings.txt`. Each alert shows once for each 7-day period: at 70%, at 90%, and when the limit resets. If you start above 90%, you only get the 90% alert. Alerts follow the account that's signed in, whether the figure came from the widget or the status line. Notices never show your email.
 
-**Wrong-account warning:** the email you expect, in `expected-account.txt`. The widget shows a warning if a different account is signed in. Without it, it doesn't warn about any account. Set from Settings, it applies at once. Edited by hand, it needs a restart of the widget.
+**Wrong-account warning:** the email you expect, in `expected-account.txt`. The widget shows a red warning if Anthropic confirms that the login token belongs to a different account. Until that check has worked, it compares the plan tier in `~/.claude.json` with the login's own tier: if they match and the email isn't the one you expect, it gives the red warning; if they differ or one is missing, it shows an amber "Couldn't verify account" note. Point at a note on the card to see the full sentence. Without the file, it doesn't warn about any account. Set from Settings, it applies at once. Edited by hand, it needs a restart of the widget.
 
 **Chat history folder:** create `chat-history-folder.txt` containing only the full path of a folder, such as a folder in your Obsidian vault. `%VAR%` values such as `%USERPROFILE%` work, and Settings refuses a path that isn't a full path. Each chat window saves one Markdown note there, in a subfolder for each month. Use a folder just for these chats, because Claude can read everything in it. Without this file, chats aren't saved. New windows pick up a change to this file.
 
@@ -191,12 +191,13 @@ Read a card before you allow it, because a command can do anything your Windows 
 | `~/.claude.json` | Reads the signed-in email and plan name |
 | `~/.claude/.credentials.json` | Reads the plan name and your Claude login token, without changing the file |
 | `https://api.anthropic.com/api/oauth/usage` | Receives the token every 5 minutes to get your usage |
+| `https://api.anthropic.com/api/oauth/profile` | Receives the token to confirm which account it belongs to, after a successful usage check: when the token changes, on each check until it's confirmed, then at most once an hour |
 | `https://api.github.com/repos/Sh0aib-Ja0allah/claude-account-widget/releases` | Asked once a day for new releases, unless you turn update checks off in Settings. GitHub sees your IP address. No token, email or other account detail is sent |
 | `claude -p` | Runs once for each chat message, using your Claude Code sign-in |
 | Your chat history folder | Claude can search and read its notes, and the widget writes one note for each chat |
 | Your files and web search | Only with laptop access on. See [Optional settings](#optional-settings) |
 
-The widget only sends the token to that Anthropic address. It doesn't save it anywhere else or renew it. The `claude` command it starts for chats handles its own sign-in, and may renew it as Claude Code normally does.
+The widget only sends the token to those two Anthropic addresses. It doesn't save it anywhere else or renew it. The `claude` command it starts for chats handles its own sign-in, and may renew it as Claude Code normally does.
 
 The widget saves its usage figures, your email and its settings in its install folder. `alert-state.txt` there records which alerts have shown, and `usage-history.csv` keeps your 7-day figure from each usage check for 90 days, at most 30,000 rows. Both are keyed by a hash of your email rather than the email itself.
 
@@ -211,6 +212,8 @@ The widget saves its usage figures, your email and its settings in its install f
 
 | What you see | What it means |
 |---|---|
+| Signed in (verified) | Anthropic confirmed the account shown for your login token, but `~/.claude.json` still names another email, which other tools may show. That can happen when another Claude app signs in with another account. Usage is checked with the token, so the figures are for the account shown, and you don't need to do anything. |
+| Couldn't verify account | The widget hasn't confirmed the account with Anthropic yet, and `~/.claude.json` shows an email other than the one you expect, with a different plan tier from your login, so the file may be stale. It checks again soon, and within seconds after Claude Code renews its login. |
 | Waiting for Claude Code to renew its login. | The login token has expired or was rejected. Checks resume after Claude Code renews it, which may need a Claude Code session. |
 | Usage checks are paused for a while. | Anthropic asked the widget to slow down. Checks restart automatically. |
 | Couldn't check usage. | The check failed, so the widget keeps the last figures and tries again later. |

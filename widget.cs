@@ -60,6 +60,8 @@ static class Program
         Application app = new Application();
         app.ShutdownMode = ShutdownMode.OnMainWindowClose;
         WidgetWindow widget = new WidgetWindow(dataDir, accountFile, credentialsFile, usageUrl, pollSeconds, manualGapSeconds, isTest);
+        if (!isTest) widget.ProfileUrl = ProfileClient.ProfileAddress;
+        else if (usageUrl != null && usageUrl.EndsWith("/usage")) widget.ProfileUrl = usageUrl.Substring(0, usageUrl.Length - "/usage".Length) + "/profile";
         // "live" is for the owner's hand tests only: a test copy that shows real notices.
         bool live = isTest && args.Length >= 7 && args[6] == "live";
         if (isTest)
@@ -90,6 +92,110 @@ static class Program
 }
 
 enum FetchStatus { Ok, RateLimited, TokenRejected, TokenExpired, Failed }
+
+// Asks Anthropic which account the login token belongs to. ~/.claude.json can hold a stale account block, for
+// example after another Claude app signs in, but the token is what usage is checked with. The token goes only to
+// this Anthropic address, as it does for usage, and is never logged or stored.
+static class ProfileClient
+{
+    internal const string ProfileAddress = "https://api.anthropic.com/api/oauth/profile";
+    const int ReplyLimit = 256 * 1024;
+
+    internal class Profile
+    {
+        public string Email;
+        public string Plan;
+    }
+
+    // The verified account, or null for any failure: no token, not 200, a redirect, a timeout, too big, or a reply
+    // without a believable email.
+    internal static Profile Fetch(string credentialsFile, string url)
+    {
+        try
+        {
+            string token = UsageClient.ReadToken(credentialsFile);
+            if (token == null) return null;
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 15000;
+            request.ReadWriteTimeout = 15000;
+            request.AllowAutoRedirect = false;
+            request.UserAgent = "ClaudeAccountWidget/" + Program.AppVersion;
+            request.Accept = "application/json";
+            request.Headers["Authorization"] = "Bearer " + token;
+            request.Headers["anthropic-beta"] = "oauth-2025-04-20";
+            string body;
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            {
+                if ((int)response.StatusCode != 200) return null;
+                MemoryStream buffer = new MemoryStream();
+                byte[] chunk = new byte[16384];
+                int read;
+                while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+                {
+                    buffer.Write(chunk, 0, read);
+                    if (buffer.Length > ReplyLimit) return null;
+                }
+                body = Encoding.UTF8.GetString(buffer.ToArray());
+            }
+            return Parse(body);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    // account.email is the identity. The plan comes from organization.rate_limit_tier; only the tier this owner's
+    // plan reports (default_claude_max_20x, shown in Claude as "Ultra") is mapped, and anything else leaves the plan
+    // to the existing labels.
+    internal static Profile Parse(string body)
+    {
+        if (body == null || body.Length > ReplyLimit) return null;
+        Dictionary<string, object> root;
+        try
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = ReplyLimit;
+            serializer.RecursionLimit = 20;
+            root = serializer.DeserializeObject(body) as Dictionary<string, object>;
+        }
+        catch (Exception e)
+        {
+            if (e is ArgumentException || e is InvalidOperationException || e is FormatException) return null;
+            throw;
+        }
+        if (root == null) return null;
+        object section;
+        Dictionary<string, object> accountPart = root.TryGetValue("account", out section) ? section as Dictionary<string, object> : null;
+        object emailValue;
+        string email = accountPart != null && accountPart.TryGetValue("email", out emailValue) ? emailValue as string : null;
+        if (!IsEmail(email)) return null;
+
+        Profile profile = new Profile();
+        profile.Email = email;
+        Dictionary<string, object> organization = root.TryGetValue("organization", out section) ? section as Dictionary<string, object> : null;
+        object tierValue;
+        string tier = organization != null && organization.TryGetValue("rate_limit_tier", out tierValue) ? tierValue as string : null;
+        if (tier == "default_claude_max_20x") profile.Plan = "Ultra";
+        return profile;
+    }
+
+    static bool IsEmail(string email)
+    {
+        if (email == null || email.Length < 3 || email.Length > 254) return false;
+        int at = email.IndexOf('@');
+        if (at <= 0 || at != email.LastIndexOf('@') || at == email.Length - 1) return false;
+        foreach (char c in email)
+        {
+            if (char.IsWhiteSpace(c) || char.IsControl(c) || c == '"' || c == '<' || c == '>') return false;
+            UnicodeCategory category = char.GetUnicodeCategory(c);
+            if (category == UnicodeCategory.Format) return false;
+        }
+        return true;
+    }
+}
 
 static class WidgetFiles
 {
@@ -1080,6 +1186,21 @@ static class UsageClient
     }
 
     // Returns a label such as "Max", or null when the login has no plan name. Only the plan fields are kept.
+    // claudeAiOauth.rateLimitTier, or null. Only that field is kept.
+    public static string ReadTier(string credentialsFile)
+    {
+        string text;
+        using (FileStream stream = new FileStream(credentialsFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+        {
+            text = reader.ReadToEnd();
+        }
+        Dictionary<string, object> oauth = Section(new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(text), "claudeAiOauth");
+        object tier;
+        if (oauth == null || !oauth.TryGetValue("rateLimitTier", out tier) || !(tier is string) || ((string)tier).Length == 0) return null;
+        return (string)tier;
+    }
+
     public static string ReadPlan(string credentialsFile)
     {
         string text;
@@ -1098,7 +1219,7 @@ static class UsageClient
         return char.ToUpperInvariant(name[0]) + name.Substring(1);
     }
 
-    static string ReadToken(string credentialsFile)
+    internal static string ReadToken(string credentialsFile)
     {
         string text;
         using (FileStream stream = new FileStream(credentialsFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
@@ -1291,6 +1412,12 @@ class WidgetWindow : Window
     readonly TextBlock planText = new TextBlock();
     DateTime planStamp = DateTime.MinValue;
     string accountPlan;
+    // oauthAccount.organizationRateLimitTier in Claude Code's file, and claudeAiOauth.rateLimitTier in the credentials.
+    string accountTier;
+    string credentialsTier;
+    DateTime tierStamp = DateTime.MinValue;
+    // The credentials file's time when a usage check last started, so a newer token triggers an early check.
+    DateTime credentialsStampChecked = DateTime.MinValue;
     string credentialsPlan;
     readonly Border divider = new Border();
     Brush cardEdge;
@@ -1458,6 +1585,14 @@ class WidgetWindow : Window
 
     readonly bool testMode;
     double lastUpdatedSeen = double.NaN;
+
+    // The account the login token belongs to, from Anthropic. Null until a profile check succeeds, and cleared as
+    // soon as the credentials file changes, so a new token is never shown with the old token's account.
+    internal string ProfileUrl;
+    string verifiedEmail;
+    string verifiedPlan;
+    DateTime profileStamp = DateTime.MinValue;
+    DateTime profileTime = DateTime.MinValue;
     SettingsWindow settingsWindow;
     AlertState alertState;
     string alertStateText;
@@ -1539,7 +1674,11 @@ class WidgetWindow : Window
 
         DispatcherTimer timer = new DispatcherTimer();
         timer.Interval = TimeSpan.FromSeconds(10);
-        timer.Tick += delegate { ApplyThemeAndRefresh(); };
+        timer.Tick += delegate
+        {
+            ApplyThemeAndRefresh();
+            CheckTokenChange();
+        };
         timer.Start();
         Refresh();
 
@@ -2736,15 +2875,104 @@ class WidgetWindow : Window
 
         fetching = true;
         lastAttempt = now;
+        try
+        {
+            credentialsStampChecked = File.GetLastWriteTimeUtc(credentialsFile);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
         string forAccount = account;
         string url = usageUrl;
         string credentials = credentialsFile;
         string target = usageFile;
         FetchResult result = await Task.Run(() => UsageClient.Fetch(credentials, url, forAccount, target));
+        // Only after a good check: a rejected token or a rate limit would make the profile request fail or add load.
+        if (result.Status == FetchStatus.Ok) await CheckProfile();
         fetching = false;
         ApplyResult(result);
         Refresh();
         if (result.Status == FetchStatus.Ok) AfterSuccessfulCheck();
+    }
+
+    // Runs only after a successful usage check, so it's never more often than usage: when the token has changed, on
+    // each check until a profile is known, then an hour after the last good one. A failure leaves the label unverified.
+    async Task CheckProfile()
+    {
+        if (ProfileUrl == null || credentialsFile == null) return;
+        DateTime stamp;
+        try
+        {
+            stamp = File.GetLastWriteTimeUtc(credentialsFile);
+        }
+        catch (IOException) { return; }
+        catch (UnauthorizedAccessException) { return; }
+        if (stamp == profileStamp && verifiedEmail != null && DateTime.UtcNow - profileTime < TimeSpan.FromHours(1)) return;
+        string credentials = credentialsFile;
+        string url = ProfileUrl;
+        ProfileClient.Profile profile = await Task.Run(() => ProfileClient.Fetch(credentials, url));
+        if (profile != null)
+        {
+            verifiedEmail = profile.Email;
+            verifiedPlan = profile.Plan;
+            profileStamp = stamp;
+            profileTime = DateTime.UtcNow;
+        }
+        else if (stamp != profileStamp)
+        {
+            verifiedEmail = null;
+            verifiedPlan = null;
+        }
+    }
+
+    string CredentialsTier()
+    {
+        if (credentialsFile == null) return null;
+        try
+        {
+            DateTime stamp = File.GetLastWriteTimeUtc(credentialsFile);
+            if (stamp != tierStamp)
+            {
+                credentialsTier = UsageClient.ReadTier(credentialsFile);
+                tierStamp = stamp;
+            }
+        }
+        catch (Exception)
+        {
+            // Keeps the last value; the file may be mid-write. It's retried on the next refresh.
+        }
+        return credentialsTier;
+    }
+
+    // Claude Code renews its token now and then, which drops the verified account. Checking soon after, instead of at
+    // the next poll, keeps the unverified state to seconds. FetchUsage's manual gap still limits how often this runs.
+    void CheckTokenChange()
+    {
+        if (usageUrl == null || credentialsFile == null) return;
+        DateTime stamp;
+        try
+        {
+            stamp = File.GetLastWriteTimeUtc(credentialsFile);
+        }
+        catch (IOException) { return; }
+        catch (UnauthorizedAccessException) { return; }
+        if (credentialsStampChecked != DateTime.MinValue && stamp != credentialsStampChecked) FetchUsage(true);
+    }
+
+    // A verified account only counts while the credentials file is the one it was checked with.
+    string VerifiedEmail()
+    {
+        if (verifiedEmail == null || credentialsFile == null) return null;
+        try
+        {
+            if (File.GetLastWriteTimeUtc(credentialsFile) != profileStamp)
+            {
+                verifiedEmail = null;
+                verifiedPlan = null;
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return verifiedEmail;
     }
 
     // Runs after each usage check that wrote a new file.
@@ -2978,7 +3206,10 @@ class WidgetWindow : Window
             }
         }
 
-        string plan = accountPlan ?? credentialsPlan;
+        // A verified account that differs from Claude Code's file means the file's plan name belongs to the other account.
+        string verified = VerifiedEmail();
+        bool fileIsStale = verified != null && !string.Equals(verified, account, StringComparison.OrdinalIgnoreCase);
+        string plan = (verified != null ? verifiedPlan : null) ?? (fileIsStale ? null : accountPlan) ?? credentialsPlan;
         bool signedIn = accountKnown && account.Length > 0;
         planText.Text = plan ?? "";
         planChip.Visibility = signedIn && plan != null ? Visibility.Visible : Visibility.Collapsed;
@@ -3005,6 +3236,8 @@ class WidgetWindow : Window
                 // The name Claude itself displays. The login file can hold an older internal name.
                 Match planMatch = Regex.Match(text, "\"oauthAccount\"\\s*:\\s*\\{.*?\"planDisplayName\"\\s*:\\s*\"([^\"]+)\"", RegexOptions.Singleline);
                 accountPlan = match.Success && planMatch.Success ? planMatch.Groups[1].Value : null;
+                Match tierMatch = Regex.Match(text, "\"oauthAccount\"\\s*:\\s*\\{[^{}]*?\"organizationRateLimitTier\"\\s*:\\s*\"([^\"]+)\"");
+                accountTier = match.Success && tierMatch.Success ? tierMatch.Groups[1].Value : null;
                 accountKnown = true;
                 accountStamp = stamp;
             }
@@ -3020,21 +3253,48 @@ class WidgetWindow : Window
         {
             ShowAccount("Not signed in", "Claude Code has no account signed in", Danger);
         }
-        else if (expectedAccount.Length == 0 || string.Equals(account, expectedAccount, StringComparison.OrdinalIgnoreCase))
-        {
-            ShowAccount(account, "Signed in to Claude Code", Good);
-        }
         else
         {
-            ShowAccount(account, "Warning: not your expected account", Danger);
+            // The token's account, from Anthropic, when known. The wrong-account warning trusts only that.
+            string verified = VerifiedEmail();
+            string shown = verified ?? account;
+            bool expectedSet = expectedAccount.Length > 0;
+            if (verified != null && expectedSet && !string.Equals(verified, expectedAccount, StringComparison.OrdinalIgnoreCase))
+            {
+                ShowAccount(shown, "Warning: not your expected account", Danger);
+            }
+            else if (verified != null && !string.Equals(verified, account, StringComparison.OrdinalIgnoreCase))
+            {
+                ShowAccount(shown, "Signed in (verified)", Good, "Anthropic confirmed this account. Claude Code's saved account file still names another email, which other tools may show. You don't need to do anything.");
+            }
+            else if (verified == null && expectedSet && !string.Equals(account, expectedAccount, StringComparison.OrdinalIgnoreCase))
+            {
+                // Not verified with Anthropic. When the file's tier matches the token's, the file and token very likely
+                // belong to the same, unexpected account. Otherwise the file may just be stale.
+                string tokenTier = CredentialsTier();
+                if (accountTier != null && tokenTier != null && accountTier == tokenTier)
+                {
+                    ShowAccount(shown, "Warning: not your expected account", Danger);
+                }
+                else
+                {
+                    ShowAccount(shown, "Couldn't verify account", Warn, "Couldn't verify the account with Anthropic. Claude Code's file shows another email.");
+                }
+            }
+            else
+            {
+                ShowAccount(shown, "Signed in to Claude Code", Good);
+            }
         }
     }
 
-    void ShowAccount(string title, string note, Brush color)
+    // The note line is short, to fit beside the plan chip; the tooltip carries the full sentence.
+    void ShowAccount(string title, string note, Brush color, string fullNote = null)
     {
         email.Text = title;
         email.ToolTip = title;
         accountNote.Text = note;
+        accountNote.ToolTip = fullNote ?? note;
         accountNote.Foreground = color == Good ? Muted : color;
         dot.Background = color;
         if (cardBorder != null) cardBorder.BorderBrush = color == Good ? cardEdge : color;
