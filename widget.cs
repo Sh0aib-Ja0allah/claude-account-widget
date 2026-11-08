@@ -3982,25 +3982,162 @@ class ChatClient
         if (running != null) KillTree(running);
     }
 
+    // Stops a process and everything it started. Windows reuses process ids, so a process whose recorded parent id
+    // matches isn't necessarily a child: it only counts if it started after its parent did (taskkill /T doesn't
+    // check this, and could kill an unrelated program). Anything whose start time can't be read is left alone.
     internal static void KillTree(Process target)
     {
         try
         {
             if (target.HasExited) return;
-            ProcessStartInfo kill = new ProcessStartInfo();
-            kill.FileName = Path.Combine(Environment.SystemDirectory, "taskkill.exe");
-            kill.Arguments = "/T /F /PID " + target.Id.ToString(CultureInfo.InvariantCulture);
-            kill.UseShellExecute = false;
-            kill.CreateNoWindow = true;
-            using (Process killer = Process.Start(kill))
+            List<KeyValuePair<int, long>> descendants = ProcessTree.Descendants(target.Id);
+            for (int i = descendants.Count - 1; i >= 0; i--) ProcessTree.Terminate(descendants[i].Key, descendants[i].Value);
+        }
+        catch (Exception) { }
+        try
+        {
+            if (!target.HasExited)
             {
-                killer.WaitForExit(3000);
+                target.Kill();
+                target.WaitForExit(3000);
             }
         }
-        catch (Exception)
+        catch (Exception) { }
+    }
+}
+
+// Finds a process's real descendants by parent id and start time, and ends one only if it's still that process.
+static class ProcessTree
+{
+    const uint SnapProcess = 0x00000002;
+    const uint QueryLimited = 0x1000;
+    const uint TerminateAccess = 0x0001;
+    static readonly IntPtr Invalid = new IntPtr(-1);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct ProcessEntry
+    {
+        public uint Size;
+        public uint Usage;
+        public uint ProcessId;
+        public IntPtr DefaultHeapId;
+        public uint ModuleId;
+        public uint Threads;
+        public uint ParentProcessId;
+        public int BasePriority;
+        public uint Flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string ExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    // The process's start time as a file time, or 0 when it can't be read.
+    internal static long StartTime(int processId)
+    {
+        IntPtr handle = OpenProcess(QueryLimited, false, (uint)processId);
+        if (handle == IntPtr.Zero) return 0;
+        try
         {
-            try { target.Kill(); }
-            catch (Exception) { }
+            long creation, exit, kernel, user;
+            return GetProcessTimes(handle, out creation, out exit, out kernel, out user) ? creation : 0;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    // Every process with its recorded parent id, from one snapshot.
+    internal static List<KeyValuePair<int, int>> Snapshot()
+    {
+        List<KeyValuePair<int, int>> all = new List<KeyValuePair<int, int>>();
+        IntPtr snapshot = CreateToolhelp32Snapshot(SnapProcess, 0);
+        if (snapshot == Invalid || snapshot == IntPtr.Zero) return all;
+        try
+        {
+            ProcessEntry entry = new ProcessEntry();
+            entry.Size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+            if (!Process32FirstW(snapshot, ref entry)) return all;
+            do
+            {
+                all.Add(new KeyValuePair<int, int>((int)entry.ProcessId, (int)entry.ParentProcessId));
+            }
+            while (Process32NextW(snapshot, ref entry));
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+        return all;
+    }
+
+    // The target's descendants, parents before children, each with its start time. A process joins only if its
+    // start time can be read and isn't earlier than its parent's or the target's.
+    internal static List<KeyValuePair<int, long>> Descendants(int targetId)
+    {
+        return Descendants(targetId, Snapshot(), StartTime);
+    }
+
+    internal static List<KeyValuePair<int, long>> Descendants(int targetId, List<KeyValuePair<int, int>> all, Func<int, long> startOf)
+    {
+        List<KeyValuePair<int, long>> found = new List<KeyValuePair<int, long>>();
+        long targetStart = startOf(targetId);
+        if (targetStart == 0) return found;
+        Dictionary<int, long> members = new Dictionary<int, long>();
+        members[targetId] = targetStart;
+        Queue<int> waiting = new Queue<int>();
+        waiting.Enqueue(targetId);
+        while (waiting.Count > 0)
+        {
+            int parent = waiting.Dequeue();
+            long parentStart = members[parent];
+            foreach (KeyValuePair<int, int> pair in all)
+            {
+                if (pair.Value != parent || pair.Key == parent || members.ContainsKey(pair.Key)) continue;
+                long start = startOf(pair.Key);
+                if (start == 0 || start < parentStart || start < targetStart) continue;
+                members[pair.Key] = start;
+                found.Add(new KeyValuePair<int, long>(pair.Key, start));
+                waiting.Enqueue(pair.Key);
+            }
+        }
+        return found;
+    }
+
+    // Ends the process only if it still has the start time it was found with, so a reused id is never killed.
+    internal static bool Terminate(int processId, long expectedStart)
+    {
+        IntPtr handle = OpenProcess(TerminateAccess | QueryLimited, false, (uint)processId);
+        if (handle == IntPtr.Zero) return false;
+        try
+        {
+            long creation, exit, kernel, user;
+            if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user) || creation != expectedStart) return false;
+            return TerminateProcess(handle, 1);
+        }
+        finally
+        {
+            CloseHandle(handle);
         }
     }
 }
