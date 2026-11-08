@@ -217,7 +217,7 @@ static partial class H4
         // R-C-07, R-C-12: failed checks change nothing; the status line writing while paused still alerts
         string srv = Fresh("s2-server");
         File.WriteAllText(Path.Combine(srv, "figure.txt"), "75," + reset.ToString("F0") + ",ok");
-        Process server = Process.Start(new ProcessStartInfo(fakeExe, "18767 \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
+        Process server = Process.Start(new ProcessStartInfo(fakeExe, TestPorts.Get(18767) + " \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
         try
         {
             await WaitFor(() => File.Exists(Path.Combine(srv, "ready.txt")), 5000);
@@ -225,7 +225,7 @@ static partial class H4
             long exp = (long)(DateTime.UtcNow.AddDays(30) - new DateTime(1970, 1, 1)).TotalMilliseconds;
             File.WriteAllText(creds, "{\"claudeAiOauth\":{\"accessToken\":\"fake-test-token\",\"expiresAt\":" + exp + "}}");
             d = Fresh("s2-c07"); r = new Recorder();
-            w = new WidgetWindow(d, account, creds, "http://127.0.0.1:18767/usage", 300, 0, true);
+            w = new WidgetWindow(d, account, creds, TestPorts.Base(18767) + "/usage", 300, 0, true);
             w.alertsOn = true; w.ShowNotice = r.Show;
             Call(w, "FetchUsage", false);
             await WaitFor(() => r.Titles.Count > 0, 8000);
@@ -254,7 +254,7 @@ static partial class H4
             string pd = Fresh("s2-proc");
             File.WriteAllText(Path.Combine(pd, "settings.txt"), "-6000,0,0,0,default,system,1,1,off");
             File.WriteAllText(Path.Combine(srv, "figure.txt"), "75," + reset.ToString("F0") + ",ok");
-            Process p = StartWidget(pd, account, creds, "http://127.0.0.1:18767/usage", "300");
+            Process p = StartWidget(pd, account, creds, TestPorts.Base(18767) + "/usage", "300");
             string log = Path.Combine(pd, "test-notices.log");
             bool got = await WaitFor(() => File.Exists(log), 10000);
             await Task.Delay(500);

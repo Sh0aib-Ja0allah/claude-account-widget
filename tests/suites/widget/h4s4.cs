@@ -98,7 +98,7 @@ static partial class H4
         // R-D-01, R-D-02, R-D-05 through real checks against the fake server
         string srv = Fresh("s4-server");
         File.WriteAllText(Path.Combine(srv, "figure.txt"), "42," + reset.ToString("F0") + ",ok");
-        Process server = Process.Start(new ProcessStartInfo(fakeExe, "18769 \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
+        Process server = Process.Start(new ProcessStartInfo(fakeExe, TestPorts.Get(18769) + " \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
         try
         {
             await WaitFor(() => File.Exists(Path.Combine(srv, "ready.txt")), 5000);
@@ -106,7 +106,7 @@ static partial class H4
             long exp = (long)(DateTime.UtcNow.AddDays(30) - new DateTime(1970, 1, 1)).TotalMilliseconds;
             File.WriteAllText(creds, "{\"claudeAiOauth\":{\"accessToken\":\"fake-test-token\",\"expiresAt\":" + exp + "}}");
             string dc = Fresh("s4-checks");
-            WidgetWindow w = new WidgetWindow(dc, account, creds, "http://127.0.0.1:18769/usage", 300, 0, true);
+            WidgetWindow w = new WidgetWindow(dc, account, creds, TestPorts.Base(18769) + "/usage", 300, 0, true);
             Func<Task> check = async delegate
             {
                 Set(w, "blockedUntil", DateTime.MinValue);

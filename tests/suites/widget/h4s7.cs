@@ -72,11 +72,11 @@ static partial class H4
         string srv = Fresh("s7-server");
         File.WriteAllText(Path.Combine(srv, "figure.txt"), "40,0,ok");
         File.WriteAllText(Path.Combine(srv, "releases.json"), "[" + Release("v9.2.0", false, false) + "," + Release("v0.0.1", false, true) + "]");
-        Process server = Process.Start(new ProcessStartInfo(fakeExe, "18771 \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
+        Process server = Process.Start(new ProcessStartInfo(fakeExe, TestPorts.Get(18771) + " \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
         try
         {
             await WaitFor(() => File.Exists(Path.Combine(srv, "ready.txt")), 5000);
-            string url = "http://127.0.0.1:18771/releases?per_page=5";
+            string url = TestPorts.Base(18771) + "/releases?per_page=5";
 
             // R-F-04: no Authorization, no token read
             string body = UpdateClient.Download(url);
@@ -98,7 +98,7 @@ static partial class H4
             File.Move(Path.Combine(srv, "releases.json"), Path.Combine(srv, "releases.hold"));
             Check("request: 404 gives null", UpdateClient.Download(url) == null);
             File.Move(Path.Combine(srv, "releases.hold"), Path.Combine(srv, "releases.json"));
-            Check("request: a non-list address gives null via Newest", UpdateClient.Newest(UpdateClient.Download("http://127.0.0.1:18771/usage"), "0.1.0") == null);
+            Check("request: a non-list address gives null via Newest", UpdateClient.Newest(UpdateClient.Download(TestPorts.Base(18771) + "/usage"), "0.1.0") == null);
 
             // R-F-05, R-F-08, R-F-10: on the card
             string d = Fresh("s7-card");

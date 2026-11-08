@@ -16,7 +16,7 @@ using System.Windows.Controls;
 static class H14
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-    const string Base = "http://127.0.0.1:18777/";
+    static readonly string Base = TestPorts.Base(18777) + "/";
     const string Token = "TOKEN-MARKER-7f3a9c";
     static string root;
     static int fails, passes;

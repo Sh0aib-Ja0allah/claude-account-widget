@@ -282,12 +282,12 @@ static partial class H4
         string srv = Fresh("server");
         long reset = (long)(DateTime.UtcNow.AddDays(3) - new DateTime(1970, 1, 1)).TotalSeconds;
         File.WriteAllText(Path.Combine(srv, "figure.txt"), "42," + reset);
-        Process server = Process.Start(new ProcessStartInfo(fakeExe, "18765 \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
+        Process server = Process.Start(new ProcessStartInfo(fakeExe, TestPorts.Get(18765) + " \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
         await WaitFor(() => File.Exists(Path.Combine(srv, "ready.txt")), 5000);
         string creds = Path.Combine(root, "creds.json");
         long exp = (long)(DateTime.UtcNow.AddDays(30) - new DateTime(1970, 1, 1)).TotalMilliseconds;
         File.WriteAllText(creds, "{\"claudeAiOauth\":{\"accessToken\":\"fake-test-token\",\"expiresAt\":" + exp + ",\"subscriptionType\":\"max\"}}");
-        string url = "http://127.0.0.1:18765/usage";
+        string url = TestPorts.Base(18765) + "/usage";
         try
         {
             // 2-argument form: off screen, not in front, no fetching.

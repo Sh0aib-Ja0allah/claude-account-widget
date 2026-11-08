@@ -3,7 +3,7 @@
 #
 #   run-tests.ps1 [-Mode quick|chat|widget|preview|all|png] [-Scratch <path>] [-TimeoutSeconds <n>] [-KeepScratch]
 #
-# quick    the in-process feature suites (h6-h12, h14-h16)                      needs: nothing but .NET Framework 4.8
+# quick    the safety lint, then the in-process feature suites (h6-h12, h14-h16)  needs: nothing but .NET Framework 4.8
 # chat     h3 format, live, regen, edit, search and crash, each in its own process
 # widget   h4 (every section), hk and h13 (real child processes), h5 (needs node)  builds the app into scratch
 # preview  h2 file preview                       needs: Python with reportlab, python-pptx, openpyxl, Pillow; LibreOffice
@@ -52,6 +52,16 @@ $previewMd5 = (Get-FileHash (Join-Path $snapshot 'preview.cs') -Algorithm MD5).H
 $savedTemp = $env:TEMP; $savedTmp = $env:TMP
 $env:TEMP = $temp; $env:TMP = $temp
 
+# Free loopback ports for the fake servers, held together while picked so they are all different. Each suite reads its port
+# from CAWT_PORT_<the port it was written with> (tests\fakes\TestPorts.cs).
+$writtenPorts = 18765, 18767, 18769, 18771, 18773, 18774, 18775, 18777, 18779
+$held = @()
+foreach ($w in $writtenPorts) {
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $l.Start(); $held += $l
+    [Environment]::SetEnvironmentVariable("CAWT_PORT_$w", [string]$l.LocalEndpoint.Port, 'Process')
+}
+foreach ($l in $held) { $l.Stop() }
+$portText = ($writtenPorts | ForEach-Object { [Environment]::GetEnvironmentVariable("CAWT_PORT_$_", 'Process') }) -join ','
 
 $results = New-Object System.Collections.Generic.List[object]
 function Add-Result([string]$suite, [int]$pass, [int]$fail, [string]$skip, [double]$seconds, [string]$note) {
@@ -61,7 +71,7 @@ function Add-Result([string]$suite, [int]$pass, [int]$fail, [string]$skip, [doub
 function Invoke-Csc([string]$exe, [string]$main, [string[]]$files) {
     $cscArgs = @('/nologo', '/nowarn:1591,4014,0219,0649,0414,0169,0168,0618', '/target:exe', "/lib:$fw,$fw\WPF,$wm", "@$tests\references.rsp", "/out:$exe")
     if ($main) { $cscArgs += "/main:$main" }
-    $text = & $csc @cscArgs @files 2>&1 | Where-Object { "$_" -notmatch 'warning CS' }
+    $text = & $csc @cscArgs @files (Join-Path $tests 'fakes\TestPorts.cs') 2>&1 | Where-Object { "$_" -notmatch 'warning CS' }
     if ($LASTEXITCODE -ne 0) { return ($text | Select-Object -First 5) -join ' ' }
     return $null
 }
@@ -131,6 +141,7 @@ function Build-App {
 }
 
 function Run-Quick {
+    Invoke-Suite 'lint' "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $tests 'lint.ps1'), '-Root', $tests) -NoSummary
     foreach ($n in 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12', 'h14', 'h15', 'h16') { Invoke-Feature $n @((Join-Path $out "$n\run")) }
 }
 
@@ -211,10 +222,11 @@ try {
 }
 finally {
     $env:TEMP = $savedTemp; $env:TMP = $savedTmp
+    foreach ($w in $writtenPorts) { [Environment]::SetEnvironmentVariable("CAWT_PORT_$w", $null, 'Process') }
 }
 
 Write-Host ""
-Write-Host "widget.cs $widgetMd5   preview.cs $previewMd5   scratch $Scratch"
+Write-Host "widget.cs $widgetMd5   preview.cs $previewMd5   scratch $Scratch   ports $portText"
 $results | Format-Table Suite, Pass, Fail, Skip, Seconds, Note -AutoSize | Out-String -Width 200 | Write-Host
 $failed = @($results | Where-Object { $_.Fail -gt 0 }).Count
 $skipped = @($results | Where-Object { $_.Skip -ne '' }).Count

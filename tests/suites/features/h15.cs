@@ -17,7 +17,7 @@ using Microsoft.Win32;
 static class H15
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-    const string Base = "http://127.0.0.1:18779/";
+    static readonly string Base = TestPorts.Base(18779) + "/";
     const string Red = "Warning: not your expected account";
     const string Amber = "Couldn't verify account";
     static string root;

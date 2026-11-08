@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -26,7 +26,7 @@ static class H12
         Log((ok ? "PASS " : "FAIL ") + what + (info.Length > 0 ? " [" + info.Replace("\r", "\\r").Replace("\n", "\\n") + "]" : ""));
         if (ok) passes++; else fails++;
     }
-    const string Base = "http://127.0.0.1:18774/";
+    static readonly string Base = TestPorts.Base(18774) + "/";
     const string Rel = "https://github.com/Sh0aib-Ja0allah/claude-account-widget/releases/tag/";
     static string mode = "ok";
     static List<string> requests = new List<string>();

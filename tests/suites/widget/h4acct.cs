@@ -47,11 +47,11 @@ static partial class H4
         double reset = Epoch(DateTime.UtcNow.AddDays(3));
         File.WriteAllText(Path.Combine(srv, "figure.txt"), "40," + reset.ToString("F0") + ",ok");
         File.WriteAllText(Path.Combine(srv, "profile.json"), OwnerProfile);
-        Process server = Process.Start(new ProcessStartInfo(fakeExe, "18775 \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
+        Process server = Process.Start(new ProcessStartInfo(fakeExe, TestPorts.Get(18775) + " \"" + srv + "\"") { UseShellExecute = false, CreateNoWindow = true });
         try
         {
             await WaitFor(() => File.Exists(Path.Combine(srv, "ready.txt")), 5000);
-            string baseUrl = "http://127.0.0.1:18775";
+            string baseUrl = TestPorts.Base(18775);
             long exp = (long)(DateTime.UtcNow.AddDays(30) - new DateTime(1970, 1, 1)).TotalMilliseconds;
 
             // Today's state: Claude Code's file has a stale label and plan; the token belongs to the expected account
