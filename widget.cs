@@ -1413,6 +1413,8 @@ class WidgetWindow : Window
     readonly TextBlock planText = new TextBlock();
     DateTime planStamp = DateTime.MinValue;
     string accountPlan;
+    string shownEmail;
+    string shownPlan;
     // oauthAccount.organizationRateLimitTier in Claude Code's file, and claudeAiOauth.rateLimitTier in the credentials.
     string accountTier;
     string credentialsTier;
@@ -2034,6 +2036,7 @@ class WidgetWindow : Window
     void OpenChatWindow()
     {
         ChatWindow chat = new ChatWindow(dataFolder);
+        chat.AttachWidget(this);
         if (OffScreenWindows)
         {
             ShowOffScreen(chat);
@@ -2264,6 +2267,11 @@ class WidgetWindow : Window
         SaveSettings();
         ShowShortcutNote(null);
         return null;
+    }
+
+    internal void OpenSettingsFromChat()
+    {
+        OpenSettings();
     }
 
     // Only one Settings window. Opening it again brings the open one forward.
@@ -2757,13 +2765,7 @@ class WidgetWindow : Window
             swatch.Fill = Accents[i, 2].Length == 0 ? (Brush)Text : Color(Accents[i, 2]);
             item.Icon = swatch;
 
-            item.Click += delegate
-            {
-                accentName = key;
-                ApplyAccent();
-                SaveSettings();
-                Refresh();
-            };
+            item.Click += delegate { ActionAccent(key); };
             accentItem.Items.Add(item);
         }
     }
@@ -3147,11 +3149,7 @@ class WidgetWindow : Window
     {
         topmostItem.Header = "Always on top";
         topmostItem.IsCheckable = true;
-        topmostItem.Click += delegate
-        {
-            Topmost = topmostItem.IsChecked;
-            SaveSettings();
-        };
+        topmostItem.Click += delegate { ActionTopmost(topmostItem.IsChecked); };
 
         startupItem.Header = "Start with Windows";
         startupItem.IsCheckable = true;
@@ -3165,7 +3163,7 @@ class WidgetWindow : Window
         else
         {
             startupItem.IsChecked = IsStartupEnabled();
-            startupItem.Click += delegate { SetStartup(startupItem.IsChecked); };
+            startupItem.Click += delegate { ActionStartup(startupItem.IsChecked); };
         }
 
         MenuItem settings = new MenuItem();
@@ -3182,7 +3180,7 @@ class WidgetWindow : Window
 
         MenuItem exit = new MenuItem();
         exit.Header = "Exit";
-        exit.Click += delegate { Close(); };
+        exit.Click += delegate { ActionExit(); };
 
         BuildAccentMenu();
 
@@ -3194,6 +3192,165 @@ class WidgetWindow : Window
         menu.Items.Add(settings);
         menu.Items.Add(refresh);
         menu.Items.Add(new Separator());
+        menu.Items.Add(exit);
+        return menu;
+    }
+
+    // The widget's actions. Its right-click menu and the chat sidebar's account menu both call these, so they can't drift.
+    internal void ActionTopmost(bool on)
+    {
+        Topmost = on;
+        topmostItem.IsChecked = on;
+        SaveSettings();
+    }
+
+    // A test copy never touches the real startup entry, which belongs to the installed widget.
+    internal void ActionStartup(bool on)
+    {
+        if (testMode) return;
+        SetStartup(on);
+        startupItem.IsChecked = on;
+    }
+
+    internal void ActionAccent(string key)
+    {
+        accentName = key;
+        ApplyAccent();
+        SaveSettings();
+        Refresh();
+    }
+
+    // Tests answer the exit question instead of a real dialog.
+    internal Func<string, bool> ConfirmExit;
+
+    // Exit closes the widget and every chat window, so it asks first when a chat is open or a reply is running.
+    internal void ActionExit()
+    {
+        int chats = ChatWindow.OpenCount;
+        if (chats > 0 || ChatWindow.AnyWorking)
+        {
+            string question = ChatWindow.AnyWorking
+                ? "A chat is still working on a reply. Exit closes the widget and every chat window, and stops the reply."
+                : chats == 1 ? "Exit closes the widget and the open chat window." : "Exit closes the widget and all " + chats.ToString(CultureInfo.InvariantCulture) + " chat windows.";
+            // Owned by the window in use (usually the chat the menu came from), so the question shows in front of it.
+            Window owner = this;
+            foreach (Window open in Application.Current.Windows)
+            {
+                if (open.IsActive) owner = open;
+            }
+            bool yes = ConfirmExit != null
+                ? ConfirmExit(question)
+                : MessageBox.Show(owner, question + " Exit anyway?", "Claude Account Widget", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
+            if (!yes) return;
+        }
+        Close();
+    }
+
+    // What the account row in a chat shows, from the widget's own account check (never a second read).
+    internal string ShownEmail
+    {
+        get { return shownEmail; }
+    }
+
+    internal string ShownPlan
+    {
+        get { return shownPlan; }
+    }
+
+    // "--" until a figure exists; the card's own text starts empty.
+    internal string SevenDayText
+    {
+        get { return sevenDay == null || sevenDay.Percent.Text.Length == 0 ? "--" : sevenDay.Percent.Text; }
+    }
+
+    // Raised after every refresh, so open chats can keep their account rows current.
+    internal event Action StatusChanged;
+
+    // A fresh menu of the same actions for a chat's account row, ticked from the current state each time it opens.
+    internal ContextMenu CreateActionsMenu()
+    {
+        ContextMenu menu = new ContextMenu();
+
+        StackPanel header = new StackPanel();
+        header.Margin = new Thickness(12, 6, 12, 6);
+        header.Focusable = false;
+        header.IsHitTestVisible = false;
+        TextBlock who = new TextBlock();
+        who.Text = shownEmail ?? "Account unknown";
+        who.FontWeight = FontWeights.SemiBold;
+        who.Foreground = Text;
+        TextBlock what = new TextBlock();
+        string percent = SevenDayText;
+        what.Text = (shownPlan != null ? shownPlan + " \u00b7 " : "") + (percent == "--" ? "usage not checked yet" : percent + " of the 7-day limit used");
+        what.FontSize = 11;
+        what.Foreground = Muted;
+        header.Children.Add(who);
+        header.Children.Add(what);
+        System.Windows.Automation.AutomationProperties.SetName(header, who.Text + ", " + what.Text);
+        menu.Items.Add(header);
+        menu.Items.Add(new Separator());
+
+        MenuItem history = new MenuItem();
+        history.Header = "Usage history";
+        history.Click += delegate { OpenHistory(); };
+        menu.Items.Add(history);
+
+        MenuItem settings = new MenuItem();
+        settings.Header = "Settings";
+        settings.Click += delegate { OpenSettings(); };
+        menu.Items.Add(settings);
+
+        MenuItem ring = new MenuItem();
+        ring.Header = "Ring color";
+        for (int i = 0; i < Accents.GetLength(0); i++)
+        {
+            string key = Accents[i, 0];
+            MenuItem item = new MenuItem();
+            item.Header = Accents[i, 1];
+            item.Tag = key;
+            item.IsCheckable = true;
+            item.IsChecked = key == accentName;
+            Shapes.Ellipse swatch = new Shapes.Ellipse();
+            swatch.Width = 10;
+            swatch.Height = 10;
+            swatch.Fill = Accents[i, 2].Length == 0 ? (Brush)Text : Color(Accents[i, 2]);
+            item.Icon = swatch;
+            item.Click += delegate { ActionAccent(key); };
+            ring.Items.Add(item);
+        }
+        menu.Items.Add(ring);
+
+        MenuItem top = new MenuItem();
+        top.Header = "Always on top";
+        top.IsCheckable = true;
+        top.IsChecked = Topmost;
+        top.Click += delegate { ActionTopmost(top.IsChecked); };
+        menu.Items.Add(top);
+
+        MenuItem startup = new MenuItem();
+        startup.Header = "Start with Windows";
+        startup.IsCheckable = true;
+        if (testMode)
+        {
+            startup.IsEnabled = false;
+            startup.ToolTip = "Not available in a test copy";
+        }
+        else
+        {
+            startup.IsChecked = startupItem.IsChecked;
+            startup.Click += delegate { ActionStartup(startup.IsChecked); };
+        }
+        menu.Items.Add(startup);
+
+        MenuItem refresh = new MenuItem();
+        refresh.Header = "Refresh now";
+        refresh.Click += delegate { RefreshNow(); };
+        menu.Items.Add(refresh);
+
+        menu.Items.Add(new Separator());
+        MenuItem exit = new MenuItem();
+        exit.Header = "Exit";
+        exit.Click += delegate { ActionExit(); };
         menu.Items.Add(exit);
         return menu;
     }
@@ -3233,6 +3390,7 @@ class WidgetWindow : Window
         bool signedIn = accountKnown && account.Length > 0;
         planText.Text = plan ?? "";
         planChip.Visibility = signedIn && plan != null ? Visibility.Visible : Visibility.Collapsed;
+        shownPlan = signedIn ? plan : null;
     }
 
     void Refresh()
@@ -3240,6 +3398,7 @@ class WidgetWindow : Window
         RefreshAccount();
         RefreshPlan();
         RefreshUsage();
+        if (StatusChanged != null) StatusChanged();
     }
 
     void RefreshAccount()
@@ -3265,6 +3424,7 @@ class WidgetWindow : Window
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
 
+        shownEmail = null;
         if (!accountKnown)
         {
             ShowAccount("Account unavailable", "Couldn't read the Claude Code account file", Warn);
@@ -3278,6 +3438,7 @@ class WidgetWindow : Window
             // The token's account, from Anthropic, when known. The wrong-account warning trusts only that.
             string verified = VerifiedEmail();
             string shown = verified ?? account;
+            shownEmail = shown;
             bool expectedSet = expectedAccount.Length > 0;
             if (verified != null && expectedSet && !string.Equals(verified, expectedAccount, StringComparison.OrdinalIgnoreCase))
             {
@@ -6193,6 +6354,132 @@ class ChatWindow : Window
         foreach (ChatWindow window in Open.ToArray()) window.Close();
     }
 
+    internal static int OpenCount
+    {
+        get { return Open.Count; }
+    }
+
+    internal static bool AnyWorking
+    {
+        get
+        {
+            foreach (ChatWindow window in Open)
+            {
+                if (window.busy) return true;
+            }
+            return false;
+        }
+    }
+
+    WidgetWindow widget;
+    readonly Border accountRow = new Border();
+    readonly Border accountInitialDisc = new Border();
+    readonly TextBlock accountInitial = new TextBlock();
+    readonly TextBlock accountEmail = new TextBlock();
+    readonly TextBlock accountPlanLine = new TextBlock();
+    // Tests receive the menu instead of it opening as a popup.
+    internal Action<ContextMenu> ShowAccountMenu;
+
+    // Connects the sidebar's account row to the widget that opened this chat.
+    internal void AttachWidget(WidgetWindow owner)
+    {
+        widget = owner;
+        widget.StatusChanged += UpdateAccountRow;
+        Closed += delegate { widget.StatusChanged -= UpdateAccountRow; };
+        accountRow.Visibility = Visibility.Visible;
+        UpdateAccountRow();
+    }
+
+    // A small round initial, the email and the plan, with a gear for Settings. Clicking the row opens the widget's menu.
+    UIElement BuildAccountRow()
+    {
+        accountInitial.FontSize = 12;
+        accountInitial.FontWeight = FontWeights.SemiBold;
+        accountInitial.HorizontalAlignment = HorizontalAlignment.Center;
+        accountInitial.VerticalAlignment = VerticalAlignment.Center;
+        accountInitialDisc.Width = 28;
+        accountInitialDisc.Height = 28;
+        accountInitialDisc.CornerRadius = new CornerRadius(14);
+        accountInitialDisc.Child = accountInitial;
+        accountInitialDisc.VerticalAlignment = VerticalAlignment.Center;
+        accountInitialDisc.Margin = new Thickness(0, 0, 10, 0);
+        Grid.SetColumn(accountInitialDisc, 0);
+
+        accountEmail.FontSize = 12;
+        accountEmail.Foreground = WidgetWindow.Text;
+        accountEmail.TextTrimming = TextTrimming.CharacterEllipsis;
+        accountPlanLine.FontSize = 11;
+        accountPlanLine.Foreground = WidgetWindow.Muted;
+        accountPlanLine.TextTrimming = TextTrimming.CharacterEllipsis;
+        StackPanel words = new StackPanel();
+        words.VerticalAlignment = VerticalAlignment.Center;
+        words.Children.Add(accountEmail);
+        words.Children.Add(accountPlanLine);
+        Grid.SetColumn(words, 1);
+
+        Border gear = new Border();
+        TextBlock gearIcon = new TextBlock();
+        WidgetWindow.BuildHeaderButton(gear, gearIcon, "\uE713", "Settings", 0);
+        gear.Margin = new Thickness(6, 0, 0, 0);
+        System.Windows.Automation.AutomationProperties.SetName(gear, "Settings");
+        MakeButton(gear, delegate { if (widget != null) widget.OpenSettingsFromChat(); });
+        Grid.SetColumn(gear, 2);
+
+        Grid line = new Grid();
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        line.Children.Add(accountInitialDisc);
+        line.Children.Add(words);
+        line.Children.Add(gear);
+
+        accountRow.Child = line;
+        accountRow.CornerRadius = new CornerRadius(10);
+        accountRow.Padding = new Thickness(8, 6, 6, 6);
+        accountRow.Margin = new Thickness(-8, 8, 0, 0);
+        accountRow.Background = Brushes.Transparent;
+        accountRow.Cursor = Cursors.Hand;
+        accountRow.ToolTip = "Account and widget menu";
+        System.Windows.Automation.AutomationProperties.SetName(accountRow, "Account and widget menu");
+        accountRow.MouseEnter += delegate { accountRow.Background = WidgetWindow.OverlaySoft; };
+        accountRow.MouseLeave += delegate { accountRow.Background = Brushes.Transparent; };
+        MakeButton(accountRow, OpenAccountMenu);
+        accountRow.Visibility = Visibility.Collapsed;
+        return accountRow;
+    }
+
+    void UpdateAccountRow()
+    {
+        if (widget == null) return;
+        string email = widget.ShownEmail;
+        string plan = widget.ShownPlan;
+        string percent = widget.SevenDayText;
+        accountEmail.Text = email ?? "Account unknown";
+        accountInitial.Text = email != null && email.Length > 0 ? char.ToUpperInvariant(email[0]).ToString() : "?";
+        string usage = percent == "--" ? "" : percent + " used";
+        accountPlanLine.Text = plan != null && usage.Length > 0 ? plan + " \u00b7 " + usage : plan ?? usage;
+        accountPlanLine.Visibility = accountPlanLine.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        System.Windows.Media.Color? accent = WidgetWindow.AccentColor;
+        accountInitialDisc.Background = accent.HasValue ? (Brush)new SolidColorBrush(accent.Value) : WidgetWindow.OverlayMid;
+        accountInitial.Foreground = accent.HasValue ? (Brush)new SolidColorBrush(WidgetWindow.Hex("#141518")) : WidgetWindow.Text;
+        string name = "Account and widget menu: " + accountEmail.Text + (accountPlanLine.Text.Length > 0 ? ", " + accountPlanLine.Text : "");
+        System.Windows.Automation.AutomationProperties.SetName(accountRow, name);
+    }
+
+    void OpenAccountMenu()
+    {
+        if (widget == null) return;
+        ContextMenu menu = widget.CreateActionsMenu();
+        if (ShowAccountMenu != null)
+        {
+            ShowAccountMenu(menu);
+            return;
+        }
+        menu.PlacementTarget = accountRow;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Top;
+        menu.IsOpen = true;
+    }
+
     // The folder comes from chat-history-folder.txt next to the app. Without one, nothing is saved.
     static string ReadHistoryFolder(string dataFolder)
     {
@@ -6556,10 +6843,13 @@ class ChatWindow : Window
         DockPanel.SetDock(newChat, Dock.Top);
         DockPanel.SetDock(search, Dock.Top);
         DockPanel.SetDock(label, Dock.Top);
+        UIElement accountLine = BuildAccountRow();
+        DockPanel.SetDock(accountLine, Dock.Bottom);
         panel.Children.Add(brand);
         panel.Children.Add(newChat);
         panel.Children.Add(search);
         panel.Children.Add(label);
+        panel.Children.Add(accountLine);
 
         ScrollViewer scroll = new ScrollViewer();
         scroll.Content = historyList;
@@ -8337,6 +8627,7 @@ class ChatWindow : Window
         System.Windows.Media.Color? accent = WidgetWindow.AccentColor;
         cardBorder.Background = WidgetWindow.CardFill(light);
         UpdateOptionLabels();
+        UpdateAccountRow();
 
         // Templates freeze a brush they use, so the shared live brush can't go here.
         Resources["ChatThumb"] = new SolidColorBrush(WidgetWindow.Muted.Color);

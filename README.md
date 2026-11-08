@@ -10,7 +10,7 @@ This is an early pre-release, so expect some rough edges.
 
 ## Features
 
-- **Account:** shows the signed-in email and plan name, with an optional warning if the wrong account is signed in.
+- **Account:** shows the account your Claude login belongs to, as confirmed by Anthropic, and its plan name, with an optional warning if it isn't the account you expect.
 - **Usage:** shows a 7-day ring with the percentage used and reset time. A 5-hour bar appears only when a 5-hour figure is reported.
 - **Pace:** shows how your usage compares with the time passed in the 7-day window, and when you'd reach the limit at that pace.
 - **Small icon:** minimizes to a pill that keeps the percentage visible.
@@ -21,6 +21,7 @@ This is an early pre-release, so expect some rough edges.
 - **Usage alerts:** optional Windows notifications when your 7-day usage reaches 70% and 90%, and when the limit resets. Off until you turn them on in Settings.
 - **Update notice:** once a day it asks GitHub whether a newer version has been released, and shows a line on the widget if so. It never downloads or installs anything.
 - **Settings:** a window for the new chat shortcut, usage alerts, update checks, the expected account, chat history folder, folders chats can read and laptop access, so you don't have to write the files by hand.
+- **Account menu in chats:** in a full-screen chat, your account sits at the bottom of the chat list, with the widget's menu and a shortcut to Settings.
 - **New chat:** opens chat windows that use your Claude Code sign-in, show formatted replies as they're written, save to a folder you choose and can look back at earlier saved chats.
 
 ## Requirements
@@ -63,8 +64,9 @@ This compiles the widget with the C# compiler included in Windows and installs i
 | Start a chat | Click the chat icon in the footer. Each click opens a new window |
 | Start a chat from any app | Choose a shortcut in Settings, such as Ctrl+Alt+Shift+C, then press it. It's off until you choose one |
 | Check usage now | Click the refresh icon (at most once every 30 seconds) |
-| See more options | Right-click for Always on top, Start with Windows, Ring color, Usage history, Settings, Refresh now and Exit |
+| See more options | Right-click for Always on top, Start with Windows, Ring color, Usage history, Settings, Refresh now and Exit. Exit closes every chat window too, so it asks first if one is open |
 | See your usage over time | Right-click and choose **Usage history** |
+| Reach the widget from a chat | In a full-screen chat, click your account at the bottom of the chat list for the widget's actions: Usage history, Settings, Ring color, Always on top, Start with Windows, Refresh now and Exit. The gear opens Settings. Exit asks first if a chat is open |
 
 Always on top starts on, and Start with Windows starts off.
 
@@ -72,7 +74,7 @@ Always on top starts on, and Start with Windows starts off.
 
 Press Enter to send and Shift+Enter for a new line. While Claude is working, the send button becomes Stop, and Esc does the same. To minimize a chat, click the **-** icon. To fill the screen, click the extend icon next to the close button or double-click the header. Click it again or press Esc to go back.
 
-**Chat history:** in full screen, a sidebar lists your saved chats under **Recents**, newest first. Click a chat to continue it, or click **New chat** to start fresh. To rename the open chat, click its name at the top and choose **Rename**. To delete a chat, choose **Delete** there, or hover over it in the list and click the trash icon, then confirm. Its note moves to the Windows Recycle Bin, and Claude can no longer recall it. The menu icon hides the sidebar, and another appears beside the chat title to bring it back. A reopened chat keeps its messages, but attached files show as no longer attached, so add them again to keep working on them. By default, Claude can only read your chat history folder and what you attach. It can't run commands or change files unless you turn on laptop access.
+**Chat history:** in full screen, a sidebar lists your saved chats under **Recents**, newest first. Click a chat to continue it, or click **New chat** to start fresh. To rename the open chat, click its name at the top and choose **Rename**. To delete a chat, choose **Delete** there, or hover over it in the list and click the trash icon, then confirm. Its note moves to the Windows Recycle Bin, and Claude can no longer recall it. The menu icon hides the sidebar, and another appears beside the chat title to bring it back. At the bottom of the sidebar, your account shows with its plan and usage: click it for the widget's menu, or click the gear for Settings. A reopened chat keeps its messages, but attached files show as no longer attached, so add them again to keep working on them. By default, Claude can only read your chat history folder and what you attach. It can't run commands or change files unless you turn on laptop access.
 
 **Search:** in full screen, the box above **Recents** searches the name and message text of your newest 300 saved chats. A chat must match every word you type. Press Esc to clear the search.
 
@@ -148,7 +150,7 @@ The widget assumes the window started exactly 7 days before it resets.
 
 ## Optional settings
 
-Right-click the widget and choose **Settings** to set these. Click **Save** to apply them. The switches are the exception: usage alerts change at once, and laptop access takes effect when you confirm it or turn it off. Open chats keep what they started with, and new chats use the new settings. Settings only writes a file you changed, so anything you wrote by hand in the others stays as it is.
+Right-click the widget and choose **Settings** to set these. Click **Save** to apply them. Some act at once without **Save**: the usage alerts and update checks switches, and the shortcut's **Set** and **Turn off**. Laptop access takes effect when you confirm it or turn it off. Open chats keep what they started with, and new chats use the new settings. Settings only writes a file you changed, so anything you wrote by hand in the others stays as it is.
 
 Each setting is a text file in the folder where the widget is installed, so you can also write them by hand.
 
@@ -158,7 +160,7 @@ Each setting is a text file in the folder where the widget is installed, so you 
 
 **Usage alerts:** off until you turn them on in Settings, which stores the choice in `settings.txt`. Each alert shows once for each 7-day period: at 70%, at 90%, and when the limit resets. If you start above 90%, you only get the 90% alert. Alerts follow the account that's signed in, whether the figure came from the widget or the status line. Notices never show your email.
 
-**Wrong-account warning:** the email you expect, in `expected-account.txt`. The widget shows a red warning if Anthropic confirms that the login token belongs to a different account. Until that check has worked, it compares the plan tier in `~/.claude.json` with the login's own tier: if they match and the email isn't the one you expect, it gives the red warning; if they differ or one is missing, it shows an amber "Couldn't verify account" note. Point at a note on the card to see the full sentence. Without the file, it doesn't warn about any account. Set from Settings, it applies at once. Edited by hand, it needs a restart of the widget.
+**Wrong-account warning:** the email you expect, in `expected-account.txt`. The widget shows a red warning if Anthropic confirms that the login token belongs to a different account. Until that check has worked, it compares the plan tier in `~/.claude.json` with the login's own tier: if they match and the email isn't the one you expect, it gives the red warning; if they differ or one is missing, it shows an amber "Couldn't verify account" note. Point at a note on the card to see the full sentence. Without the file, it doesn't warn about any account. Whether or not you set it, the card says "Signed in (verified)" when the confirmed account differs from the email in `~/.claude.json`. Set from Settings, it applies at once. Edited by hand, it needs a restart of the widget.
 
 **Chat history folder:** create `chat-history-folder.txt` containing only the full path of a folder, such as a folder in your Obsidian vault. `%VAR%` values such as `%USERPROFILE%` work, and Settings refuses a path that isn't a full path. Each chat window saves one Markdown note there, in a subfolder for each month. Use a folder just for these chats, because Claude can read everything in it. Without this file, chats aren't saved. New windows pick up a change to this file.
 
@@ -188,11 +190,11 @@ Read a card before you allow it, because a command can do anything your Windows 
 
 | Item | Use |
 |---|---|
-| `~/.claude.json` | Reads the signed-in email and plan name |
-| `~/.claude/.credentials.json` | Reads the plan name and your Claude login token, without changing the file |
+| `~/.claude.json` | Reads the signed-in email, plan name and plan tier. The email is shown only until Anthropic confirms the account |
+| `~/.claude/.credentials.json` | Reads the plan name, plan tier and your Claude login token, without changing the file |
 | `https://api.anthropic.com/api/oauth/usage` | Receives the token every 5 minutes to get your usage |
 | `https://api.anthropic.com/api/oauth/profile` | Receives the token to confirm which account it belongs to, after a successful usage check: when the token changes, on each check until it's confirmed, then at most once an hour |
-| `https://api.github.com/repos/Sh0aib-Ja0allah/claude-account-widget/releases` | Asked once a day for new releases, unless you turn update checks off in Settings. GitHub sees your IP address. No token, email or other account detail is sent |
+| `https://api.github.com/repos/Sh0aib-Ja0allah/claude-account-widget/releases?per_page=5` | Asked once a day for new releases, unless you turn update checks off in Settings. GitHub sees your IP address. No token, email or other account detail is sent |
 | `claude -p` | Runs once for each chat message, using your Claude Code sign-in |
 | Your chat history folder | Claude can search and read its notes, and the widget writes one note for each chat |
 | Your files and web search | Only with laptop access on. See [Optional settings](#optional-settings) |
@@ -236,10 +238,11 @@ The widget saves its usage figures, your email and its settings in its install f
 1. Right-click the widget, turn off **Start with Windows** if it's on, and choose **Exit**.
 2. Delete the widget's folder. For a source build, that's `%LOCALAPPDATA%\ClaudeAccountWidget`.
 3. Remove the `statusLine` setting if you added it.
+4. If you want, delete the chat notes in your chat history folder and the `Claude` folder on your desktop, which laptop access creates. Preview pages cached in your temp folder are removed after two weeks.
 
 ## Releasing a new version
 
-Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.0`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none.
+Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.0`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none. Build the exe for the release with `build.ps1 -OutDir` from a clean copy of the tagged commit, not your working folder, and put its SHA-256 in the release notes. The update notice reads pre-releases too.
 
 ## License
 
