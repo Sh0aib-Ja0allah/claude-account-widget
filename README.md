@@ -156,7 +156,7 @@ Each setting is a text file in the folder where the widget is installed, so you 
 
 **New chat shortcut:** off until you choose one in Settings. Click the box, press the keys, then click **Set**. It needs two of Ctrl, Alt and Shift, including Ctrl or Alt, plus a letter, number or function key, so it can't take over a key like Ctrl+C in other apps. Include Shift, as Ctrl+Alt+Shift+C does, because on some keyboards Ctrl+Alt plus a letter types a character such as €. If another app already uses it, Settings and the widget say so and the old shortcut stays. **Turn off** removes it.
 
-**Update checks:** on unless you turn them off in Settings. Once a day the widget asks GitHub for this project's releases, including pre-releases. If one is newer than yours, a line on the widget says "Version 0.2.0 is available". Click it to open the release page, or click the x to hide that version until a newer one comes out. A failed check counts too, so an offline PC tries again the next day.
+**Update checks:** on unless you turn them off in Settings. Once a day the widget asks GitHub for this project's releases, including pre-releases. If one is newer than yours, a line on the widget says "Version 0.3.0 is available". Click it to open the release page, or click the x to hide that version until a newer one comes out. A failed check counts too, so an offline PC tries again the next day.
 
 **Usage alerts:** off until you turn them on in Settings, which stores the choice in `settings.txt`. Each alert shows once for each 7-day period: at 70%, at 90%, and when the limit resets. If you start above 90%, you only get the 90% alert. Alerts follow the account that's signed in, whether the figure came from the widget or the status line. Notices never show your email.
 
