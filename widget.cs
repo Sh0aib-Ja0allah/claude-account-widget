@@ -64,6 +64,7 @@ static class Program
         else if (usageUrl != null && usageUrl.EndsWith("/usage")) widget.ProfileUrl = usageUrl.Substring(0, usageUrl.Length - "/usage".Length) + "/profile";
         // "live" is for the owner's hand tests only: a test copy that shows real notices.
         bool live = isTest && args.Length >= 7 && args[6] == "live";
+        widget.ShowTestWindows = live;
         if (isTest)
         {
             // Keeps a saved off-screen position off screen and out of the way.
@@ -1584,6 +1585,15 @@ class WidgetWindow : Window
     internal string shortcutSetting = "off";
 
     readonly bool testMode;
+    // Set by Program for the owner's "live" hand tests: windows the widget opens show on screen and can take focus.
+    // Automated test mode leaves it off, so they stay off screen.
+    internal bool ShowTestWindows;
+
+    // True when the windows the widget opens must stay off screen and unfocused: automated test mode only.
+    internal bool OffScreenWindows
+    {
+        get { return testMode && !ShowTestWindows; }
+    }
     double lastUpdatedSeen = double.NaN;
 
     // The account the login token belongs to, from Anthropic. Null until a profile check succeeds, and cleared as
@@ -2024,7 +2034,7 @@ class WidgetWindow : Window
     void OpenChatWindow()
     {
         ChatWindow chat = new ChatWindow(dataFolder);
-        if (testMode)
+        if (OffScreenWindows)
         {
             ShowOffScreen(chat);
             return;
@@ -2261,7 +2271,7 @@ class WidgetWindow : Window
     {
         if (settingsWindow != null)
         {
-            if (!testMode)
+            if (!OffScreenWindows)
             {
                 if (settingsWindow.WindowState == WindowState.Minimized) settingsWindow.WindowState = WindowState.Normal;
                 settingsWindow.Activate();
@@ -2270,7 +2280,7 @@ class WidgetWindow : Window
         }
         settingsWindow = new SettingsWindow(this, dataFolder);
         settingsWindow.Closed += delegate { settingsWindow = null; };
-        if (testMode)
+        if (OffScreenWindows)
         {
             ShowOffScreen(settingsWindow);
             return;
@@ -2286,7 +2296,7 @@ class WidgetWindow : Window
         if (historyWindow != null)
         {
             historyWindow.Reload();
-            if (!testMode)
+            if (!OffScreenWindows)
             {
                 if (historyWindow.WindowState == WindowState.Minimized) historyWindow.WindowState = WindowState.Normal;
                 historyWindow.Activate();
@@ -2295,7 +2305,7 @@ class WidgetWindow : Window
         }
         historyWindow = new UsageHistoryWindow(this, historyFile);
         historyWindow.Closed += delegate { historyWindow = null; };
-        if (testMode)
+        if (OffScreenWindows)
         {
             ShowOffScreen(historyWindow);
             return;
@@ -3145,8 +3155,18 @@ class WidgetWindow : Window
 
         startupItem.Header = "Start with Windows";
         startupItem.IsCheckable = true;
-        startupItem.IsChecked = IsStartupEnabled();
-        startupItem.Click += delegate { SetStartup(startupItem.IsChecked); };
+        if (testMode)
+        {
+            // A test copy must not read or change the real startup entry, which belongs to the installed widget.
+            startupItem.IsChecked = false;
+            startupItem.IsEnabled = false;
+            startupItem.ToolTip = "Not available in a test copy";
+        }
+        else
+        {
+            startupItem.IsChecked = IsStartupEnabled();
+            startupItem.Click += delegate { SetStartup(startupItem.IsChecked); };
+        }
 
         MenuItem settings = new MenuItem();
         settings.Header = "Settings";
@@ -5020,6 +5040,7 @@ class SettingsWindow : Window
     readonly SolidColorBrush warnText = new SolidColorBrush();
     readonly SolidColorBrush switchOn = new SolidColorBrush();
     readonly List<string> readLines = new List<string>();
+    readonly ScrollViewer scroll = new ScrollViewer();
 
     string loadedExpected = "";
     string loadedHistory = "";
@@ -5035,9 +5056,9 @@ class SettingsWindow : Window
         dataFolder = folder;
 
         Title = "Claude widget settings";
-        Width = 420;
+        Width = 441;
         SizeToContent = SizeToContent.Height;
-        MaxHeight = 720;
+        MaxHeight = FitHeight(SystemParameters.WorkArea.Height);
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -5058,6 +5079,12 @@ class SettingsWindow : Window
             if (laptopWarning.Visibility == Visibility.Visible) laptopWarning.Visibility = Visibility.Collapsed;
             else Close();
         };
+    }
+
+    // At most 756 tall, and never taller than the screen's work area, so the pinned buttons stay visible.
+    internal static double FitHeight(double workAreaHeight)
+    {
+        return Math.Max(320, Math.Min(756, workAreaHeight));
     }
 
     string PathOf(string name)
@@ -5094,7 +5121,6 @@ class SettingsWindow : Window
     UIElement BuildCard()
     {
         StackPanel stack = new StackPanel();
-        stack.Children.Add(BuildHeader());
 
         stack.Children.Add(Heading("Expected account"));
         StyleBox(expectedBox);
@@ -5172,22 +5198,38 @@ class SettingsWindow : Window
         message.TextWrapping = TextWrapping.Wrap;
         message.Margin = new Thickness(0, 8, 0, 0);
         message.Visibility = Visibility.Collapsed;
-        stack.Children.Add(message);
-
         Border save = TextButton("Save", delegate { Save(); });
         Border close = TextButton("Close", Close);
         close.Margin = new Thickness(0, 0, 8, 0);
         StackPanel buttons = new StackPanel();
         buttons.Orientation = Orientation.Horizontal;
         buttons.HorizontalAlignment = HorizontalAlignment.Right;
-        buttons.Margin = new Thickness(0, 14, 0, 0);
+        buttons.Margin = new Thickness(0, 12, 0, 0);
         buttons.Children.Add(close);
         buttons.Children.Add(save);
-        stack.Children.Add(buttons);
 
-        ScrollViewer scroll = new ScrollViewer();
-        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+        // The fields scroll by wheel, touchpad and keyboard (focus scrolls a field into view), with no visible bar,
+        // which wouldn't follow the theme. The header and the message and buttons stay pinned outside the scroll.
+        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+        scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+        scroll.Focusable = false;
         scroll.Content = stack;
+
+        StackPanel footer = new StackPanel();
+        footer.Children.Add(message);
+        footer.Children.Add(buttons);
+        UIElement header = BuildHeader();
+        // Rows in the order they're shown, so Tab reaches the fields before the pinned buttons.
+        Grid layout = new Grid();
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(header, 0);
+        Grid.SetRow(scroll, 1);
+        Grid.SetRow(footer, 2);
+        layout.Children.Add(header);
+        layout.Children.Add(scroll);
+        layout.Children.Add(footer);
 
         DropShadowEffect shadow = new DropShadowEffect();
         shadow.BlurRadius = 12;
@@ -5200,7 +5242,7 @@ class SettingsWindow : Window
         card.CornerRadius = new CornerRadius(16);
         card.Padding = new Thickness(16, 10, 16, 14);
         card.Effect = shadow;
-        card.Child = scroll;
+        card.Child = layout;
         return card;
     }
 
@@ -5211,6 +5253,8 @@ class SettingsWindow : Window
         WidgetWindow.BuildHeaderButton(closeButton, closeIcon, "\uE711", "Close", -6);
         AutomationName(closeButton, "Close");
         ChatWindow.MakeButton(closeButton, Close);
+        // Out of the Tab order: the pinned Close button and Esc do the same, and Tab should start at the first field.
+        KeyboardNavigation.SetIsTabStop(closeButton, false);
 
         Shapes.Path spark = WidgetWindow.BuildSpark(16);
         spark.Margin = new Thickness(0, 0, 8, 0);
@@ -5341,18 +5385,24 @@ class SettingsWindow : Window
         track.ToolTip = title;
         AutomationName(track, title);
         ChatWindow.MakeButton(track, toggle);
-        DockPanel.SetDock(track, Dock.Right);
 
+        // Text in a star column, the switch in an auto column, with a 12 px gap, so wrapped text never runs under it.
         StackPanel text = new StackPanel();
+        text.Margin = new Thickness(0, 0, 12, 0);
         TextBlock name = Heading(title);
         name.Margin = new Thickness(0);
+        name.TextWrapping = TextWrapping.Wrap;
         text.Children.Add(name);
         text.Children.Add(Hint(hint, false));
 
-        DockPanel row = new DockPanel();
+        Grid row = new Grid();
         row.Margin = new Thickness(0, 16, 0, 0);
-        row.Children.Add(track);
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(text, 0);
+        Grid.SetColumn(track, 1);
         row.Children.Add(text);
+        row.Children.Add(track);
         ShowSwitches();
         return row;
     }
@@ -6088,7 +6138,7 @@ class ChatWindow : Window
         if (historyFolder != null) noteWriter = new ChatNoteWriter(historyFolder);
 
         Title = "New chat";
-        Width = 396;
+        Width = 441;
         Height = 536;
         MinWidth = 320;
         MinHeight = 380;
