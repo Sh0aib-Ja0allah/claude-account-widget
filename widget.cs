@@ -4785,7 +4785,7 @@ class ChatNoteWriter
             temp = Path.Combine(month, "." + shortId + ".tmp");
             File.WriteAllText(temp, BuildNote(turns), new UTF8Encoding(false));
 
-            // Obsidian or a sync tool can hold the note briefly.
+            // A notes app or a sync tool can hold the note briefly.
             for (int attempt = 0; ; attempt++)
             {
                 try
@@ -6119,10 +6119,10 @@ class ChatWindow : Window
     // label is the newest one seen so far, and RememberModelVersion updates it from Claude's replies.
     static readonly string[,] Models = { { "fable", "Fable 5.1" }, { "opus", "Opus 5.5" }, { "sonnet", "Sonnet 5.5" }, { "haiku", "Haiku 5.5" } };
     static readonly string[,] Efforts = { { "low", "Low" }, { "medium", "Medium" }, { "high", "High" }, { "xhigh", "Extra high" }, { "max", "Max" } };
-    const string SavedNote = "Saved to Obsidian. Remembers saved chats.";
+    const string SavedNote = "Saved to your chat history folder. Remembers saved chats.";
     const string UnsavedNote = "Not being saved. Can't recall other chats.";
     const string LaptopNote = " Reads your files. Asks before changes or commands.";
-    const string SecondBrainNote = "Has access to your Obsidian second brain.";
+    const string SecondBrainNote = "Can read your chat history and chosen folders.";
     const string SaveFailedNote = "Couldn't save the last reply. This chat keeps working, but it isn't saved.";
 
     internal const string ChatXaml = @"
@@ -6373,8 +6373,7 @@ class ChatWindow : Window
 
     WidgetWindow widget;
     readonly Border accountRow = new Border();
-    readonly Border accountInitialDisc = new Border();
-    readonly TextBlock accountInitial = new TextBlock();
+    readonly Shapes.Path accountSpark = WidgetWindow.BuildSpark(22);
     readonly TextBlock accountEmail = new TextBlock();
     readonly TextBlock accountPlanLine = new TextBlock();
     // Tests receive the menu instead of it opening as a popup.
@@ -6393,17 +6392,9 @@ class ChatWindow : Window
     // A small round initial, the email and the plan, with a gear for Settings. Clicking the row opens the widget's menu.
     UIElement BuildAccountRow()
     {
-        accountInitial.FontSize = 12;
-        accountInitial.FontWeight = FontWeights.SemiBold;
-        accountInitial.HorizontalAlignment = HorizontalAlignment.Center;
-        accountInitial.VerticalAlignment = VerticalAlignment.Center;
-        accountInitialDisc.Width = 28;
-        accountInitialDisc.Height = 28;
-        accountInitialDisc.CornerRadius = new CornerRadius(14);
-        accountInitialDisc.Child = accountInitial;
-        accountInitialDisc.VerticalAlignment = VerticalAlignment.Center;
-        accountInitialDisc.Margin = new Thickness(0, 0, 10, 0);
-        Grid.SetColumn(accountInitialDisc, 0);
+        // The same Claude spark as the sidebar header and the card, in its own colour like theirs.
+        accountSpark.Margin = new Thickness(3, 0, 13, 0);
+        Grid.SetColumn(accountSpark, 0);
 
         accountEmail.FontSize = 12;
         accountEmail.Foreground = WidgetWindow.Text;
@@ -6429,7 +6420,7 @@ class ChatWindow : Window
         line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         line.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        line.Children.Add(accountInitialDisc);
+        line.Children.Add(accountSpark);
         line.Children.Add(words);
         line.Children.Add(gear);
 
@@ -6455,13 +6446,9 @@ class ChatWindow : Window
         string plan = widget.ShownPlan;
         string percent = widget.SevenDayText;
         accountEmail.Text = email ?? "Account unknown";
-        accountInitial.Text = email != null && email.Length > 0 ? char.ToUpperInvariant(email[0]).ToString() : "?";
         string usage = percent == "--" ? "" : percent + " used";
         accountPlanLine.Text = plan != null && usage.Length > 0 ? plan + " \u00b7 " + usage : plan ?? usage;
         accountPlanLine.Visibility = accountPlanLine.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        System.Windows.Media.Color? accent = WidgetWindow.AccentColor;
-        accountInitialDisc.Background = accent.HasValue ? (Brush)new SolidColorBrush(accent.Value) : WidgetWindow.OverlayMid;
-        accountInitial.Foreground = accent.HasValue ? (Brush)new SolidColorBrush(WidgetWindow.Hex("#141518")) : WidgetWindow.Text;
         string name = "Account and widget menu: " + accountEmail.Text + (accountPlanLine.Text.Length > 0 ? ", " + accountPlanLine.Text : "");
         System.Windows.Automation.AutomationProperties.SetName(accountRow, name);
     }

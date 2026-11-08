@@ -31,9 +31,18 @@ static partial class H4
         Border row = (Border)Get(chat, "accountRow");
         TextBlock email = (TextBlock)Get(chat, "accountEmail");
         TextBlock plan = (TextBlock)Get(chat, "accountPlanLine");
-        TextBlock initial = (TextBlock)Get(chat, "accountInitial");
+        System.Windows.Shapes.Path spark = (System.Windows.Shapes.Path)Get(chat, "accountSpark");
         Check("row: shown in a chat opened from the widget", row.Visibility == Visibility.Visible);
-        Check("row: email, plan and usage from the widget", email.Text == "sample@example.com" && plan.Text == "Max · 52% used" && initial.Text == "S", email.Text + " | " + plan.Text + " | " + initial.Text);
+        Check("row: email, plan and usage from the widget", email.Text == "sample@example.com" && plan.Text == "Max · 52% used", email.Text + " | " + plan.Text);
+        Check("row: the Claude spark in place of an initial, sized to the row", spark.Width == 22 && spark.Height == 22 && Grid.GetColumn(spark) == 0 && spark.Parent is Grid
+            && spark.Fill is System.Windows.Media.SolidColorBrush && ((System.Windows.Media.SolidColorBrush)spark.Fill).Color.ToString() == "#FFD97757");
+        Check("row: no initial left", chat.GetType().GetField("accountInitial", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic) == null
+            && chat.GetType().GetField("accountInitialDisc", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic) == null);
+        System.Reflection.BindingFlags constants = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        string savedNote = (string)typeof(ChatWindow).GetField("SavedNote", constants).GetRawConstantValue();
+        string readNote = (string)typeof(ChatWindow).GetField("SecondBrainNote", constants).GetRawConstantValue();
+        Check("wording: neutral notes, no app named", savedNote == "Saved to your chat history folder. Remembers saved chats." && readNote == "Can read your chat history and chosen folders."
+            && typeof(ChatWindow).GetFields(constants).Where(f => f.IsLiteral && f.FieldType == typeof(string)).All(f => !((string)f.GetRawConstantValue()).Contains("Obsidian")), savedNote + " | " + readNote);
         Check("row: keyboard-reachable with an accessible name", row.Focusable && System.Windows.Automation.AutomationProperties.GetName(row).Contains("sample@example.com"));
 
         // Kept current
@@ -67,7 +76,7 @@ static partial class H4
         shown = null; ClickBorder(row);
         Check("menu: reopened, it shows the new state", ItemNamed(shown, "Always on top").IsChecked == !wasTop
             && ItemNamed(shown, "Ring color").Items.OfType<MenuItem>().Single(i => i.IsChecked).Tag as string == "blue");
-        Check("row: the initial follows the ring colour", ((Border)Get(chat, "accountInitialDisc")).Background is System.Windows.Media.SolidColorBrush);
+        Check("row: the spark keeps the Claude colour, like the header's", ((System.Windows.Media.SolidColorBrush)spark.Fill).Color.ToString() == "#FFD97757");
         ItemNamed(shown, "Ring color").Items.OfType<MenuItem>().First(i => (string)i.Tag == "default").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
 
         ItemNamed(shown, "Settings").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
@@ -91,6 +100,9 @@ static partial class H4
         chat.Width = 900; chat.UpdateLayout();
         foreach (string theme in new[] { "dark", "light" }) { ThemeOf(host, theme); chat.UpdateLayout(); ShotOf((FrameworkElement)chat.Content, "sidebar-account-" + theme); }
         ThemeOf(host, "dark");
+        double sparkTop = spark.TranslatePoint(new Point(0, 0), row).Y;
+        Check("row: the rendered spark is 22 px and sits inside the row", spark.ActualWidth == 22 && spark.ActualHeight == 22 && sparkTop >= 0 && sparkTop + spark.ActualHeight <= row.ActualHeight,
+            spark.ActualWidth.ToString("F0") + " at " + sparkTop.ToString("F0") + " in " + row.ActualHeight.ToString("F0"));
 
         // Exit asks first when a chat is open, and a "no" keeps everything
         string asked = null;
@@ -146,7 +158,7 @@ static partial class H4
         uc.ShowAccountMenu = delegate(ContextMenu m) { um = m; };
         ClickBorder((Border)Get(uc, "accountRow"));
         Check("unknown account: the row shows without an email, and the menu keeps every action", ((TextBlock)Get(uc, "accountEmail")).Text == "Account unknown"
-            && ((TextBlock)Get(uc, "accountInitial")).Text == "?" && um != null && um.Items.OfType<MenuItem>().Count() == 7);
+            && Get(uc, "accountSpark") is System.Windows.Shapes.Path && um != null && um.Items.OfType<MenuItem>().Count() == 7);
         uw.ConfirmExit = delegate(string q) { return true; };
         uw.ActionExit();
 
