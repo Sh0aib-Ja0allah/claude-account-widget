@@ -1,0 +1,24 @@
+# References for every test suite. run-tests.ps1 passes /lib: for the .NET Framework, WPF and WinMetadata folders,
+# so these names resolve on any Windows 10 or 11 PC with .NET Framework 4.8.
+/r:PresentationFramework.dll
+/r:PresentationCore.dll
+/r:WindowsBase.dll
+/r:ReachFramework.dll
+/r:System.Printing.dll
+/r:System.Xaml.dll
+/r:System.Web.Extensions.dll
+/r:System.Core.dll
+/r:Microsoft.VisualBasic.dll
+/r:Microsoft.CSharp.dll
+/r:System.Runtime.dll
+/r:System.Runtime.WindowsRuntime.dll
+/r:System.Threading.Tasks.dll
+/r:System.IO.dll
+/r:System.Windows.Forms.dll
+/r:System.Drawing.dll
+/r:Windows.Foundation.winmd
+/r:Windows.Data.winmd
+/r:Windows.Storage.winmd
+/r:Windows.Graphics.winmd
+/r:Windows.Media.winmd
+/r:Windows.Globalization.winmd
