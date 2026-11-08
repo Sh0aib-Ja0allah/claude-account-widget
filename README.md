@@ -240,6 +240,17 @@ The widget saves its usage figures, your email and its settings in its install f
 3. Remove the `statusLine` setting if you added it.
 4. If you want, delete the chat notes in your chat history folder and the `Claude` folder on your desktop, which laptop access creates. Preview pages cached in your temp folder are removed after two weeks.
 
+## Testing
+
+The tests are in `tests/`. They compile the widget's source with the same C# compiler as `build.ps1`, open their windows off screen, use fake servers on your own PC instead of Anthropic or GitHub, and never touch your installed widget, your Claude Code sign-in or your files. A safety check also makes sure no test reaches a real address or holds personal data.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1            # quick checks
+powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode all  # everything
+```
+
+The file preview tests need Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. The status line checks need Node.js. Without these, those tests are skipped and the run says so. Results go to a scratch folder under `C:\cawt`, which is removed when everything passes. See [tests/README.md](tests/README.md) for each mode.
+
 ## Releasing a new version
 
 Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.0`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none. Build the exe for the release with `build.ps1 -OutDir` from a clean copy of the tagged commit, not your working folder, and put its SHA-256 in the release notes. The update notice reads pre-releases too.

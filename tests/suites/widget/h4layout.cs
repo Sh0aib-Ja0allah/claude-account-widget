@@ -44,6 +44,12 @@ static partial class H4
                 double before = scroll.VerticalOffset;
                 scroll.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(scroll), 0, Key.PageDown) { RoutedEvent = Keyboard.KeyDownEvent });
                 sw.UpdateLayout();
+                // Under heavy load the scroll can land a few frames later, so wait up to about a second for it.
+                for (int i = 0; i < 20 && scroll.VerticalOffset <= before; i++)
+                {
+                    await Task.Delay(50);
+                    sw.UpdateLayout();
+                }
                 Check(tag + ": PageDown scrolls the hidden scroll", scroll.VerticalOffset > before, before.ToString("F0") + " to " + scroll.VerticalOffset.ToString("F0"));
                 scroll.ScrollToTop(); sw.UpdateLayout();
                 ((FrameworkElement)Get(sw, "laptopSwitch")).BringIntoView();
