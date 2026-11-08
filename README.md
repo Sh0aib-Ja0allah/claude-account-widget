@@ -2,7 +2,7 @@
 
 A small Windows desktop widget that shows which account Claude Code is signed in to and how much of your plan's usage limit you've used.
 
-![The full widget and small icon in dark and light themes, plus the right-click menu with its ring color options, showing a sample account at 52% of the 7-day limit](docs/widget.png)
+![The full widget and small icon in dark and light themes, plus the right-click menu with Usage history, Settings and its ring color options, showing a sample account at 52% of the 7-day limit with a forecast that it lasts until reset](docs/widget.png)
 
 > **Unofficial project.** This isn't affiliated with or endorsed by Anthropic. Claude and the Claude logo are Anthropic's trademarks.
 
@@ -12,11 +12,15 @@ This is an early pre-release, so expect some rough edges.
 
 - **Account:** shows the signed-in email and plan name, with an optional warning if the wrong account is signed in.
 - **Usage:** shows a 7-day ring with the percentage used and reset time. A 5-hour bar appears only when a 5-hour figure is reported.
-- **Pace:** shows how your usage compares with the time passed in the 7-day window.
+- **Pace:** shows how your usage compares with the time passed in the 7-day window, and when you'd reach the limit at that pace.
 - **Small icon:** minimizes to a pill that keeps the percentage visible.
 - **Appearance:** follows the Windows light or dark theme, with six ring colors.
 - **App icon:** shows the Claude spark in the taskbar and on the app file.
 - **Alert colors:** turns amber at 70% and red at 90%, whichever ring color you choose.
+- **Usage history:** a chart of the current 7-day period against an even pace, and the peak of each of the last 8 periods. A row is recorded at each usage check, so a gap means no check ran, for example while Anthropic had paused checks.
+- **Usage alerts:** optional Windows notifications when your 7-day usage reaches 70% and 90%, and when the limit resets. Off until you turn them on in Settings.
+- **Update notice:** once a day it asks GitHub whether a newer version has been released, and shows a line on the widget if so. It never downloads or installs anything.
+- **Settings:** a window for the new chat shortcut, usage alerts, update checks, the expected account, chat history folder, folders chats can read and laptop access, so you don't have to write the files by hand.
 - **New chat:** opens chat windows that use your Claude Code sign-in, show formatted replies as they're written, save to a folder you choose and can look back at earlier saved chats.
 
 ## Requirements
@@ -57,8 +61,10 @@ This compiles the widget with the C# compiler included in Windows and installs i
 | Minimize it | Click the eye icon |
 | Reopen it | Click the small icon |
 | Start a chat | Click the chat icon in the footer. Each click opens a new window |
+| Start a chat from any app | Choose a shortcut in Settings, such as Ctrl+Alt+Shift+C, then press it. It's off until you choose one |
 | Check usage now | Click the refresh icon (at most once every 30 seconds) |
-| See more options | Right-click for Always on top, Start with Windows, Ring color, Refresh now and Exit |
+| See more options | Right-click for Always on top, Start with Windows, Ring color, Usage history, Settings, Refresh now and Exit |
+| See your usage over time | Right-click and choose **Usage history** |
 
 Always on top starts on, and Start with Windows starts off.
 
@@ -127,19 +133,38 @@ The tick on the ring marks how much of the 7-day window has passed. The label co
 | **On pace** | Your usage is within 5 points of the time passed |
 | **Above pace** | Your usage is more than 5 points ahead of the time passed |
 
+The line under the label is a forecast: if you keep using Claude at your average pace since the window started, when would you reach the limit?
+
+| Line | Meaning |
+|---|---|
+| **Full by Wed 12:59 PM** | You'd reach the limit at that local time, before it resets |
+| **Full in 5h 20m** | The same, within the next 24 hours |
+| **Lasts until reset** | At this pace you won't reach the limit before it resets |
+| **Limit reached** | The card shows 100% |
+
+The forecast is hidden in the first 12 hours of the window and below 5% used, because there's too little to go on, and when the reset time is unknown. It's a straight line from the window's start through your current usage, so a busy day early on makes it look sooner than it will be.
+
 The widget assumes the window started exactly 7 days before it resets.
 
 ## Optional settings
 
-These settings use the folder where the widget is installed.
+Right-click the widget and choose **Settings** to set these. Click **Save** to apply them. The switches are the exception: usage alerts change at once, and laptop access takes effect when you confirm it or turn it off. Open chats keep what they started with, and new chats use the new settings. Settings only writes a file you changed, so anything you wrote by hand in the others stays as it is.
 
-**Wrong-account warning:** create `expected-account.txt` containing only the email you expect, then restart the widget. It shows a warning if a different account is signed in. Without this file, it doesn't warn about any account.
+Each setting is a text file in the folder where the widget is installed, so you can also write them by hand.
 
-**Chat history folder:** create `chat-history-folder.txt` containing only the full path of a folder, such as a folder in your Obsidian vault. Each chat window saves one Markdown note there, in a subfolder for each month. Use a folder just for these chats, because Claude can read everything in it. Without this file, chats aren't saved. New windows pick up a change to this file.
+**New chat shortcut:** off until you choose one in Settings. Click the box, press the keys, then click **Set**. It needs two of Ctrl, Alt and Shift, including Ctrl or Alt, plus a letter, number or function key, so it can't take over a key like Ctrl+C in other apps. Include Shift, as Ctrl+Alt+Shift+C does, because on some keyboards Ctrl+Alt plus a letter types a character such as €. If another app already uses it, Settings and the widget say so and the old shortcut stays. **Turn off** removes it.
 
-**Folders every chat can read:** create `chat-read-folders.txt` with one full folder path per line, such as your Obsidian vault. Every new chat window can search and read them and is told to look there when you ask about your notes. Whatever Claude reads goes to Anthropic. This doesn't let Claude change those folders. Without laptop access it can't edit anything, and with it, each edit still needs your approval.
+**Update checks:** on unless you turn them off in Settings. Once a day the widget asks GitHub for this project's releases, including pre-releases. If one is newer than yours, a line on the widget says "Version 0.2.0 is available". Click it to open the release page, or click the x to hide that version until a newer one comes out. A failed check counts too, so an offline PC tries again the next day.
 
-**Laptop access for chats:** create `chat-access.txt` containing only `laptop`. New chat windows can then:
+**Usage alerts:** off until you turn them on in Settings, which stores the choice in `settings.txt`. Each alert shows once for each 7-day period: at 70%, at 90%, and when the limit resets. If you start above 90%, you only get the 90% alert. Alerts follow the account that's signed in, whether the figure came from the widget or the status line. Notices never show your email.
+
+**Wrong-account warning:** the email you expect, in `expected-account.txt`. The widget shows a warning if a different account is signed in. Without it, it doesn't warn about any account. Set from Settings, it applies at once. Edited by hand, it needs a restart of the widget.
+
+**Chat history folder:** create `chat-history-folder.txt` containing only the full path of a folder, such as a folder in your Obsidian vault. `%VAR%` values such as `%USERPROFILE%` work, and Settings refuses a path that isn't a full path. Each chat window saves one Markdown note there, in a subfolder for each month. Use a folder just for these chats, because Claude can read everything in it. Without this file, chats aren't saved. New windows pick up a change to this file.
+
+**Folders every chat can read:** create `chat-read-folders.txt` with one full folder path per line, such as your Obsidian vault. Settings marks a folder that can't be found, such as one on a drive that isn't connected, and keeps it until you remove it. Every new chat window can search and read them and is told to look there when you ask about your notes. Whatever Claude reads goes to Anthropic. This doesn't let Claude change those folders. Without laptop access it can't edit anything, and with it, each edit still needs your approval.
+
+**Laptop access for chats:** create `chat-access.txt` containing only `laptop`, or turn it on in Settings, which shows this list first. New chat windows can then:
 
 - Read files on your fixed drives, without asking. What Claude reads goes to Anthropic.
 - Create and edit files in its output folder, without asking. The first time, it makes a `Claude` folder on your desktop with the Claude icon. If that folder already exists, the chat asks whether to use it or a new one, and saves your choice in `chat-output-folder.txt`.
@@ -166,13 +191,14 @@ Read a card before you allow it, because a command can do anything your Windows 
 | `~/.claude.json` | Reads the signed-in email and plan name |
 | `~/.claude/.credentials.json` | Reads the plan name and your Claude login token, without changing the file |
 | `https://api.anthropic.com/api/oauth/usage` | Receives the token every 5 minutes to get your usage |
+| `https://api.github.com/repos/Sh0aib-Ja0allah/claude-account-widget/releases` | Asked once a day for new releases, unless you turn update checks off in Settings. GitHub sees your IP address. No token, email or other account detail is sent |
 | `claude -p` | Runs once for each chat message, using your Claude Code sign-in |
 | Your chat history folder | Claude can search and read its notes, and the widget writes one note for each chat |
 | Your files and web search | Only with laptop access on. See [Optional settings](#optional-settings) |
 
 The widget only sends the token to that Anthropic address. It doesn't save it anywhere else or renew it. The `claude` command it starts for chats handles its own sign-in, and may renew it as Claude Code normally does.
 
-The widget saves its usage figures, your email and its settings in its install folder.
+The widget saves its usage figures, your email and its settings in its install folder. `alert-state.txt` there records which alerts have shown, and `usage-history.csv` keeps your 7-day figure from each usage check for 90 days, at most 30,000 rows. Both are keyed by a hash of your email rather than the email itself.
 
 **Chat privacy:**
 
@@ -193,6 +219,9 @@ The widget saves its usage figures, your email and its settings in its install f
 | Couldn't save the last reply. | The note couldn't be written, so check the folder. The chat keeps working, and the next reply tries again. |
 | Claude Code wasn't found. | `claude` isn't on your PATH. |
 | Claude Code isn't signed in. | Sign in to Claude Code in a terminal, then try again. |
+| The chat shortcut ... is in use by another app. | Another app registered that combination first. Choose a different one in Settings. |
+| No usage alert appeared | Alerts are off until you turn them on in Settings. Each shows once for each 7-day period. Windows can hold back notifications while Do not disturb is on or a full-screen app is running. |
+| `build.ps1` says the running widget didn't exit within 10 seconds. | The build closes a running copy first and waits for it to exit. End `ClaudeAccountWidget.exe` in Task Manager, then run `build.ps1` again. |
 
 ## Limitations
 
@@ -204,6 +233,10 @@ The widget saves its usage figures, your email and its settings in its install f
 1. Right-click the widget, turn off **Start with Windows** if it's on, and choose **Exit**.
 2. Delete the widget's folder. For a source build, that's `%LOCALAPPDATA%\ClaudeAccountWidget`.
 3. Remove the `statusLine` setting if you added it.
+
+## Releasing a new version
+
+Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.0`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none.
 
 ## License
 

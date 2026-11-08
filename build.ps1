@@ -9,12 +9,19 @@ $src = $PSScriptRoot
 $winmd = "$env:WINDIR\System32\WinMetadata"
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
+# A full path, so a relative -OutDir still finds a running copy to close.
+$OutDir = (Resolve-Path $OutDir).Path
 
 $exe = Join-Path $OutDir 'ClaudeAccountWidget.exe'
-Get-Process ClaudeAccountWidget -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq $exe } |
-    Stop-Process
-Start-Sleep -Milliseconds 500
+$running = @(Get-Process ClaudeAccountWidget -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $exe })
+$running | Stop-Process
+# Compiling while the old widget is still exiting fails, because its exe is still in use.
+foreach ($old in $running) {
+    if (-not $old.WaitForExit(10000)) {
+        throw "The running widget (process $($old.Id)) didn't exit within 10 seconds, so $exe is still in use. End it in Task Manager, then run build.ps1 again."
+    }
+}
 
 & "$fw\csc.exe" /nologo /target:winexe "/out:$exe" `
     "/win32icon:$(Join-Path $src 'claude-spark.ico')" `
@@ -23,6 +30,8 @@ Start-Sleep -Milliseconds 500
     "/r:$fw\WPF\WindowsBase.dll" `
     "/r:$fw\System.Xaml.dll" `
     "/r:$fw\System.Web.Extensions.dll" `
+    "/r:$fw\System.Windows.Forms.dll" `
+    "/r:$fw\System.Drawing.dll" `
     "/r:$fw\Microsoft.VisualBasic.dll" `
     "/r:$fw\WPF\ReachFramework.dll" `
     "/r:$fw\WPF\System.Printing.dll" `

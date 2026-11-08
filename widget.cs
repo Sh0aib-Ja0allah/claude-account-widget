@@ -26,10 +26,14 @@ using Microsoft.Win32;
 
 static class Program
 {
+    // The one version number. A release is tagged "v" plus this, so raise it before tagging.
+    internal const string AppVersion = "0.1.0";
+
     [STAThread]
     static void Main(string[] args)
     {
-        // Optional test arguments: <data folder> <account file> [<credentials file> <usage url> <poll seconds>]
+        // Optional test arguments: <data folder> <account file> [<credentials file> <usage url> <poll seconds> [<release list url> [live]]]
+        // Test mode never shows a real notice or registers a real shortcut: notices go to test-notices.log in the data folder.
         bool isTest = args.Length >= 2;
         bool created = true;
         Mutex mutex = isTest ? null : new Mutex(true, "ClaudeAccountWidget.SingleInstance", out created);
@@ -46,7 +50,7 @@ static class Program
         int manualGapSeconds = 30;
         if (isTest)
         {
-            bool testsFetching = args.Length == 5;
+            bool testsFetching = args.Length >= 5;
             credentialsFile = testsFetching ? args[2] : null;
             usageUrl = testsFetching ? args[3] : null;
             pollSeconds = testsFetching ? int.Parse(args[4], CultureInfo.InvariantCulture) : 300;
@@ -55,7 +59,28 @@ static class Program
 
         Application app = new Application();
         app.ShutdownMode = ShutdownMode.OnMainWindowClose;
-        app.Run(new WidgetWindow(dataDir, accountFile, credentialsFile, usageUrl, pollSeconds, manualGapSeconds));
+        WidgetWindow widget = new WidgetWindow(dataDir, accountFile, credentialsFile, usageUrl, pollSeconds, manualGapSeconds, isTest);
+        // "live" is for the owner's hand tests only: a test copy that shows real notices.
+        bool live = isTest && args.Length >= 7 && args[6] == "live";
+        if (isTest)
+        {
+            // Keeps a saved off-screen position off screen and out of the way.
+            widget.ShowActivated = false;
+            if (args.Length >= 6 && args[5].Length > 0) widget.ReleasesUrl = args[5];
+        }
+        if (isTest && !live)
+        {
+            widget.ShowNotice = TestNotices.Writer(Path.Combine(dataDir, "test-notices.log"));
+        }
+        else
+        {
+            TrayNotice tray = new TrayNotice(widget.BringForward);
+            widget.ShowNotice = tray.Show;
+            widget.Closed += delegate { tray.Dispose(); };
+            widget.ShortcutRegistrar = new Win32ShortcutRegistrar();
+            if (!isTest) widget.ReleasesUrl = UpdateClient.ReleasesAddress;
+        }
+        app.Run(widget);
         GC.KeepAlive(mutex);
 
         // Windows' PDF component can hang while a process unloads it, which would leave the app
@@ -65,6 +90,936 @@ static class Program
 }
 
 enum FetchStatus { Ok, RateLimited, TokenRejected, TokenExpired, Failed }
+
+static class WidgetFiles
+{
+    // Writes UTF-8 without a byte order mark to a temporary file first, so an interrupted write leaves the old file whole.
+    public static void WriteAtomic(string path, string text)
+    {
+        string temp = path + ".widget.tmp";
+        try
+        {
+            File.WriteAllText(temp, text);
+            if (File.Exists(path)) File.Replace(temp, path, null);
+            else File.Move(temp, path);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(temp)) File.Delete(temp);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+}
+
+// Test mode's stand-in for a real notice: one line per notice in a log file, closed at once.
+static class TestNotices
+{
+    public static Action<string, string, Action> Writer(string logFile)
+    {
+        return delegate(string title, string text, Action closed)
+        {
+            try
+            {
+                File.AppendAllText(logFile, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) + "\t" + title + "\t" + text + "\r\n");
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            if (closed != null) closed();
+        };
+    }
+}
+
+// Registers and releases a global shortcut. Register returns 0, or the Windows error code.
+interface IShortcutRegistrar
+{
+    int Register(IntPtr window, int id, uint modifiers, uint key);
+    void Unregister(IntPtr window, int id);
+}
+
+// The real global shortcut. Only Program creates one, and never in test mode without "live".
+class Win32ShortcutRegistrar : IShortcutRegistrar
+{
+    const uint NoRepeat = 0x4000;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool UnregisterHotKey(IntPtr window, int id);
+
+    public int Register(IntPtr window, int id, uint modifiers, uint key)
+    {
+        return RegisterHotKey(window, id, modifiers | NoRepeat, key) ? 0 : Marshal.GetLastWin32Error();
+    }
+
+    public void Unregister(IntPtr window, int id)
+    {
+        UnregisterHotKey(window, id);
+    }
+}
+
+// Shortcut text as saved in settings.txt: modifiers then a WPF key name, such as Ctrl+Alt+Shift+C or
+// Ctrl+Alt+OemComma, so a comma never appears in the comma-separated file. "off" means none.
+static class ShortcutText
+{
+    internal const uint Alt = 1, Ctrl = 2, Shift = 4;
+    internal const string Suggested = "Ctrl+Alt+Shift+C";
+
+    // Two or more of Ctrl, Alt and Shift, one of them Ctrl or Alt, plus one ordinary key. A global Ctrl+C or Alt+F4
+    // would break those keys in every app, so single modifiers are refused, and so is the Windows key.
+    internal static bool IsAllowed(uint modifiers, Key key)
+    {
+        int count = ((modifiers & Ctrl) != 0 ? 1 : 0) + ((modifiers & Alt) != 0 ? 1 : 0) + ((modifiers & Shift) != 0 ? 1 : 0);
+        if (count < 2 || (modifiers & (Ctrl | Alt)) == 0) return false;
+        return IsOrdinaryKey(key);
+    }
+
+    static bool IsOrdinaryKey(Key key)
+    {
+        if (key >= Key.A && key <= Key.Z) return true;
+        if (key >= Key.D0 && key <= Key.D9) return true;
+        if (key >= Key.NumPad0 && key <= Key.NumPad9) return true;
+        if (key >= Key.F1 && key <= Key.F24) return true;
+        switch (key)
+        {
+            case Key.Space: case Key.Insert: case Key.Delete: case Key.Home: case Key.End: case Key.PageUp: case Key.PageDown:
+            case Key.Left: case Key.Right: case Key.Up: case Key.Down:
+            case Key.OemComma: case Key.OemPeriod: case Key.OemMinus: case Key.OemPlus: case Key.OemQuestion: case Key.OemSemicolon:
+            case Key.OemQuotes: case Key.OemOpenBrackets: case Key.OemCloseBrackets: case Key.OemPipe: case Key.OemTilde: case Key.OemBackslash:
+                return true;
+        }
+        return false;
+    }
+
+    internal static string Format(uint modifiers, Key key)
+    {
+        string text = "";
+        if ((modifiers & Ctrl) != 0) text += "Ctrl+";
+        if ((modifiers & Alt) != 0) text += "Alt+";
+        if ((modifiers & Shift) != 0) text += "Shift+";
+        return text + key.ToString();
+    }
+
+    // False for "off", for anything damaged, and for a combination the rule refuses.
+    internal static bool TryParse(string text, out uint modifiers, out Key key)
+    {
+        modifiers = 0;
+        key = Key.None;
+        if (text == null || text.Length == 0 || text.Length > 40 || text == "off") return false;
+        string[] parts = text.Split('+');
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            uint flag = parts[i] == "Ctrl" ? Ctrl : parts[i] == "Alt" ? Alt : parts[i] == "Shift" ? Shift : 0;
+            if (flag == 0 || (modifiers & flag) != 0) return false;
+            modifiers |= flag;
+        }
+        string name = parts[parts.Length - 1];
+        if (name.Length == 0 || !char.IsLetter(name[0]) || !Enum.TryParse(name, false, out key) || !Enum.IsDefined(typeof(Key), key)) return false;
+        return IsAllowed(modifiers, key);
+    }
+
+    // How a shortcut reads to a person: OemComma as a comma, D1 as 1.
+    internal static string Display(string text)
+    {
+        uint modifiers;
+        Key key;
+        if (!TryParse(text, out modifiers, out key)) return text;
+        // Display only: WPF gives some keys an older alias name (PageDown is Next), and the stored name stays as it is.
+        string name = key.ToString();
+        if (key >= Key.D0 && key <= Key.D9) name = name.Substring(1);
+        else if (key >= Key.NumPad0 && key <= Key.NumPad9) name = "Num " + name.Substring(6);
+        else if (key == Key.PageDown) name = "PageDown";
+        else if (key == Key.PageUp) name = "PageUp";
+        else if (key == Key.OemBackslash) name = "<";
+        else if (key == Key.OemComma) name = ",";
+        else if (key == Key.OemPeriod) name = ".";
+        else if (key == Key.OemMinus) name = "-";
+        else if (key == Key.OemPlus) name = "=";
+        else if (key == Key.OemQuestion) name = "/";
+        else if (key == Key.OemSemicolon) name = ";";
+        else if (key == Key.OemQuotes) name = "'";
+        else if (key == Key.OemOpenBrackets) name = "[";
+        else if (key == Key.OemCloseBrackets) name = "]";
+        else if (key == Key.OemPipe) name = "\\";
+        else if (key == Key.OemTilde) name = "`";
+        return Format(modifiers, Key.None).Replace("None", "") + name;
+    }
+}
+
+// A release tag: v?MAJOR.MINOR.PATCH, optionally -prerelease and +build, compared the SemVer way.
+// Tags come from the network, so anything else, or anything over 32 characters, is refused.
+class VersionTag
+{
+    public long Major;
+    public long Minor;
+    public long Patch;
+    public string[] Pre = new string[0];
+    public string Text;
+
+    static readonly Regex Shape = new Regex(@"^v?([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z");
+
+    internal static VersionTag Parse(string tag)
+    {
+        if (tag == null || tag.Length == 0 || tag.Length > 32) return null;
+        Match match = Shape.Match(tag);
+        if (!match.Success) return null;
+        VersionTag version = new VersionTag();
+        version.Major = long.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        version.Minor = long.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+        version.Patch = long.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture);
+        if (match.Groups[4].Success) version.Pre = match.Groups[4].Value.Split('.');
+        version.Text = tag.StartsWith("v") ? tag.Substring(1) : tag;
+        int plus = version.Text.IndexOf('+');
+        if (plus >= 0) version.Text = version.Text.Substring(0, plus);
+        return version;
+    }
+
+    // Below 0 when a is older. Build data is ignored, and a version without a prerelease is newer than one with.
+    internal static int Compare(VersionTag a, VersionTag b)
+    {
+        int c = a.Major.CompareTo(b.Major);
+        if (c == 0) c = a.Minor.CompareTo(b.Minor);
+        if (c == 0) c = a.Patch.CompareTo(b.Patch);
+        if (c != 0) return c;
+        if (a.Pre.Length == 0 || b.Pre.Length == 0) return Math.Sign(b.Pre.Length.CompareTo(a.Pre.Length));
+        for (int i = 0; i < Math.Min(a.Pre.Length, b.Pre.Length); i++)
+        {
+            long x, y;
+            bool xn = long.TryParse(a.Pre[i], NumberStyles.None, CultureInfo.InvariantCulture, out x);
+            bool yn = long.TryParse(b.Pre[i], NumberStyles.None, CultureInfo.InvariantCulture, out y);
+            if (xn && yn) c = x.CompareTo(y);
+            else if (xn) c = -1;
+            else if (yn) c = 1;
+            else c = string.CompareOrdinal(a.Pre[i], b.Pre[i]);
+            if (c != 0) return Math.Sign(c);
+        }
+        return a.Pre.Length.CompareTo(b.Pre.Length);
+    }
+}
+
+// Asks GitHub for this repo's releases. It has its own request and never sees the login token.
+static class UpdateClient
+{
+    internal const string Repo = "Sh0aib-Ja0allah/claude-account-widget";
+    internal const string ReleasesAddress = "https://api.github.com/repos/" + Repo + "/releases?per_page=5";
+    const int ReplyLimit = 1024 * 1024;
+
+    internal static TimeSpan Deadline = TimeSpan.FromSeconds(30);
+
+    // The reply text, or null for any failure: not 200, a redirect, a timeout, over 1 MB, or the whole request
+    // taking longer than Deadline. Each read also waits only for what's left, so a server sending a byte at a
+    // time can't hold it.
+    internal static string Download(string url)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        try
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 15000;
+            request.ReadWriteTimeout = 15000;
+            request.AllowAutoRedirect = false;
+            request.UserAgent = "ClaudeAccountWidget/" + Program.AppVersion;
+            request.Accept = "application/vnd.github+json";
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream stream = response.GetResponseStream())
+            {
+                if ((int)response.StatusCode != 200) return null;
+                MemoryStream body = new MemoryStream();
+                byte[] buffer = new byte[16384];
+                int read;
+                while (true)
+                {
+                    TimeSpan left = Deadline - clock.Elapsed;
+                    if (left <= TimeSpan.Zero) return null;
+                    stream.ReadTimeout = (int)Math.Max(1, Math.Min(15000, left.TotalMilliseconds));
+                    read = stream.Read(buffer, 0, buffer.Length);
+                    if (read <= 0) break;
+                    body.Write(buffer, 0, read);
+                    if (body.Length > ReplyLimit) return null;
+                }
+                return Encoding.UTF8.GetString(body.ToArray());
+            }
+        }
+        catch (Exception e)
+        {
+            if (e is WebException || e is IOException || e is NotSupportedException || e is UriFormatException || e is System.Security.SecurityException || e is InvalidOperationException) return null;
+            throw;
+        }
+    }
+
+    // https on github.com, under this repo's releases, with nothing that could lead elsewhere.
+    internal static bool IsReleaseLink(string link)
+    {
+        if (link == null || link.Length == 0 || link.Length > 300 || !DocumentBuilder.IsWebLink(link)) return false;
+        if (link.IndexOf("..", StringComparison.Ordinal) >= 0 || link.IndexOf('%') >= 0 || link.IndexOf('\\') >= 0) return false;
+        Uri uri;
+        if (!Uri.TryCreate(link, UriKind.Absolute, out uri)) return false;
+        return uri.Scheme == Uri.UriSchemeHttps && string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort
+            && uri.Query.Length == 0 && uri.Fragment.Length == 0
+            && uri.AbsolutePath.StartsWith("/" + Repo + "/releases/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The newest release that isn't a draft, has a valid tag and link, and is newer than current: { tag, link } or null.
+    internal static string[] Newest(string json, string current)
+    {
+        VersionTag mine = VersionTag.Parse(current);
+        if (json == null || mine == null) return null;
+        object parsed;
+        try
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = ReplyLimit;
+            serializer.RecursionLimit = 20;
+            parsed = serializer.DeserializeObject(json);
+        }
+        catch (Exception e)
+        {
+            if (e is ArgumentException || e is InvalidOperationException || e is FormatException) return null;
+            throw;
+        }
+        object[] list = parsed as object[];
+        if (list == null) return null;
+        VersionTag best = null;
+        string bestTag = null;
+        string bestLink = null;
+        foreach (object item in list)
+        {
+            Dictionary<string, object> release = item as Dictionary<string, object>;
+            if (release == null) continue;
+            object draft;
+            if (release.TryGetValue("draft", out draft) && !(draft is bool && !(bool)draft)) continue;
+            object tagValue, linkValue;
+            if (!release.TryGetValue("tag_name", out tagValue) || !release.TryGetValue("html_url", out linkValue)) continue;
+            string tag = tagValue as string;
+            string link = linkValue as string;
+            VersionTag version = VersionTag.Parse(tag);
+            if (version == null || !IsReleaseLink(link) || VersionTag.Compare(version, mine) <= 0) continue;
+            if (best == null || VersionTag.Compare(version, best) > 0)
+            {
+                best = version;
+                bestTag = tag;
+                bestLink = link;
+            }
+        }
+        return best == null ? null : new[] { bestTag, bestLink };
+    }
+}
+
+// update-check.txt: last attempt (epoch seconds), the newest tag and its link, and a dismissed tag. Each value is
+// checked when read, so a damaged or tampered file shows nothing and can't open a bad link.
+class UpdateState
+{
+    public double Last;
+    public string Tag;
+    public string Link;
+    public string Dismissed;
+
+    internal static UpdateState Load(string file)
+    {
+        UpdateState state = new UpdateState();
+        try
+        {
+            if (!File.Exists(file) || new FileInfo(file).Length > 4096) return state;
+            foreach (string line in File.ReadAllLines(file))
+            {
+                int equals = line.IndexOf('=');
+                if (equals <= 0) continue;
+                string name = line.Substring(0, equals);
+                string value = line.Substring(equals + 1).Trim();
+                double last;
+                if (name == "last" && double.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out last)) state.Last = last;
+                else if (name == "tag" && VersionTag.Parse(value) != null) state.Tag = value;
+                else if (name == "link" && UpdateClient.IsReleaseLink(value)) state.Link = value;
+                else if (name == "dismissed" && VersionTag.Parse(value) != null) state.Dismissed = value;
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        if (state.Tag == null || state.Link == null)
+        {
+            state.Tag = null;
+            state.Link = null;
+        }
+        return state;
+    }
+
+    internal bool Save(string file)
+    {
+        StringBuilder text = new StringBuilder();
+        text.Append("last=").Append(Last.ToString("F0", CultureInfo.InvariantCulture)).Append("\r\n");
+        if (Tag != null && Link != null) text.Append("tag=").Append(Tag).Append("\r\nlink=").Append(Link).Append("\r\n");
+        if (Dismissed != null) text.Append("dismissed=").Append(Dismissed).Append("\r\n");
+        try
+        {
+            WidgetFiles.WriteAtomic(file, text.ToString());
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    // A check is due a day after the last attempt. A last attempt in the future counts as due.
+    internal bool Due(double now)
+    {
+        return Last <= 0 || Last > now || now - Last >= 86400;
+    }
+
+    // The tag to offer, or null: newer than this version and not dismissed.
+    internal string Offer(string current)
+    {
+        VersionTag tag = VersionTag.Parse(Tag);
+        VersionTag mine = VersionTag.Parse(current);
+        if (tag == null || mine == null || Link == null || VersionTag.Compare(tag, mine) <= 0) return null;
+        VersionTag dismissed = VersionTag.Parse(Dismissed);
+        if (dismissed != null && VersionTag.Compare(tag, dismissed) <= 0) return null;
+        return Tag;
+    }
+}
+
+static class UsagePeriod
+{
+    // Reset times are epoch seconds. Only a move of an hour or more past the largest reset time seen so far
+    // starts a new period, so small wobbles, a time moving back and two writers disagreeing never count.
+    public static bool IsNew(double largestSeen, double newReset)
+    {
+        if (double.IsNaN(largestSeen) || double.IsNaN(newReset)) return false;
+        if (largestSeen <= 0 || newReset <= 0) return false;
+        return newReset >= largestSeen + 3600;
+    }
+}
+
+static class SettingPaths
+{
+    // A folder path from a settings file, after %VAR% values expand. It must start with a drive root such as C:\
+    // or be a UNC path. Drive-relative paths (C:notes, C:) and paths without a drive (\notes) are refused, because
+    // they depend on the widget's current folder. Returns the full path, or null.
+    internal static string FullFolder(string raw)
+    {
+        try
+        {
+            string folder = Environment.ExpandEnvironmentVariables(raw.Trim().Trim('"'));
+            if (!IsFull(folder)) return null;
+            return Path.GetFullPath(folder);
+        }
+        catch (Exception e)
+        {
+            if (e is ArgumentException || e is NotSupportedException || e is PathTooLongException || e is System.Security.SecurityException) return null;
+            throw;
+        }
+    }
+
+    // True for a path that starts with a drive root (C:\ or C:/) or is a UNC path, so it means the same thing
+    // whatever the current folder is.
+    internal static bool IsFull(string path)
+    {
+        bool drive = path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' && (path[2] == '\\' || path[2] == '/');
+        bool unc = path.StartsWith(@"\\") || path.StartsWith("//");
+        return drive || unc;
+    }
+}
+
+// The "updated" time in usage.json is epoch milliseconds from a file anything can write.
+static class UpdatedTimes
+{
+    // The time in UTC, or null when it's unknown: not a number, 0 or less, or more than a day ahead, which also
+    // keeps it far from DateTime's limits.
+    internal static DateTime? ToUtc(double epochMs, DateTime nowUtc)
+    {
+        if (double.IsNaN(epochMs) || double.IsInfinity(epochMs) || epochMs <= 0) return null;
+        DateTime epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        if (epochMs > (nowUtc - epoch).TotalMilliseconds + 86400000) return null;
+        return epoch.AddMilliseconds(epochMs);
+    }
+}
+
+// Reset times in usage.json are epoch seconds from a file anything can write, so they're checked before use.
+static class ResetTimes
+{
+    static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    // The reset time in UTC, or null when it's unknown: not a number, 0 or less, or more than 60 days ahead,
+    // which also keeps it far from DateTime's limits. A time in the past is returned, because it means a reset.
+    internal static DateTime? ToUtc(double resets, DateTime nowUtc)
+    {
+        if (double.IsNaN(resets) || double.IsInfinity(resets) || resets <= 0) return null;
+        if (resets > (nowUtc - Epoch).TotalSeconds + 60 * 86400) return null;
+        return Epoch.AddSeconds(resets);
+    }
+}
+
+static class AccountKeys
+{
+    // The first 16 hex characters of the SHA-256 of the lowercased email, so saved files never hold the email.
+    public static string Of(string account)
+    {
+        using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+        {
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(account.Trim().ToLowerInvariant()));
+            StringBuilder text = new StringBuilder();
+            for (int i = 0; i < 8; i++) text.Append(hash[i].ToString("x2", CultureInfo.InvariantCulture));
+            return text.ToString();
+        }
+    }
+}
+
+// usage-history.csv: one row per usage check that changed something, or once an hour if nothing did:
+// "epoch seconds,percent,reset epoch seconds,account key". The key is a hash, never the email.
+static class UsageHistory
+{
+    internal const long TrimAt = 2 * 1024 * 1024;
+    internal const int MaxRows = 30000;
+    internal const double MaxAgeSeconds = 90 * 86400;
+    static readonly object gate = new object();
+
+    internal class Row
+    {
+        public double Time;
+        public double Percent;
+        public double Reset;
+        public string Key;
+    }
+
+    static double NowEpoch()
+    {
+        return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+    }
+
+    internal static Row Parse(string line)
+    {
+        return Parse(line, NowEpoch());
+    }
+
+    // Skips anything damaged: wrong field count, numbers that don't parse, a key that isn't 16 hex characters,
+    // and values no real row has. That keeps a cut-off row from passing as an absurd time, and keeps every time
+    // the chart converts well inside DateTime's range.
+    internal static Row Parse(string line, double now)
+    {
+        if (line == null || line.Length > 200) return null;
+        string[] parts = line.Trim().Split(',');
+        if (parts.Length != 4 || !Regex.IsMatch(parts[3], "^[0-9a-f]{16}\\z")) return null;
+        Row row = new Row();
+        if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out row.Time) || row.Time <= 0 || double.IsInfinity(row.Time)) return null;
+        if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out row.Percent) || double.IsNaN(row.Percent) || double.IsInfinity(row.Percent)) return null;
+        if (!double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out row.Reset) || double.IsNaN(row.Reset) || double.IsInfinity(row.Reset)) return null;
+        row.Key = parts[3];
+        if (row.Time < now - MaxAgeSeconds - 86400 || row.Time > now + 86400) return null;
+        if (row.Percent < 0 || row.Percent > 120) return null;
+        if (row.Reset != 0 && (row.Reset < row.Time - 7 * 86400 || row.Reset > row.Time + 60 * 86400)) return null;
+        return row;
+    }
+
+    static string Format(Row row)
+    {
+        return string.Format(CultureInfo.InvariantCulture, "{0:F0},{1},{2:F0},{3}\r\n",
+            row.Time, Math.Round(row.Percent, 2).ToString("0.##", CultureInfo.InvariantCulture), row.Reset, row.Key);
+    }
+
+    // The last part of the file, at most this many bytes, split into lines. A cut first line is dropped.
+    internal static List<string> ReadTail(string file, long bytes)
+    {
+        List<string> lines = new List<string>();
+        if (!File.Exists(file)) return lines;
+        using (FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            long start = Math.Max(0, stream.Length - bytes);
+            stream.Seek(start, SeekOrigin.Begin);
+            using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                string text = reader.ReadToEnd();
+                string[] split = text.Replace("\r\n", "\n").Split('\n');
+                for (int i = start > 0 ? 1 : 0; i < split.Length; i++)
+                {
+                    if (split[i].Length > 0) lines.Add(split[i]);
+                }
+            }
+        }
+        return lines;
+    }
+
+    // Adds a row unless the account's last row has the same figures and is under an hour old. Returns false
+    // when the file couldn't be written; it never throws for file problems, so a check never fails because of it.
+    internal static bool Append(string file, double now, double percent, double reset, string key)
+    {
+        // The same bounds Parse accepts, so every written row can be read back and the hour rule can see it.
+        percent = Math.Max(0, Math.Min(120, percent));
+        if (reset < 0 || reset > now + 60 * 86400) reset = 0;
+        lock (gate)
+        {
+            try
+            {
+                Row last = null;
+                List<string> tail = ReadTail(file, 64 * 1024);
+                for (int i = tail.Count - 1; i >= 0 && last == null; i--)
+                {
+                    Row row = Parse(tail[i], now);
+                    if (row != null && row.Key == key) last = row;
+                }
+                if (last != null && Math.Round(last.Percent, 2) == Math.Round(percent, 2) && last.Reset == Math.Round(reset) && now - last.Time < 3600 && now >= last.Time) return true;
+
+                Row added = new Row();
+                added.Time = now;
+                added.Percent = percent;
+                added.Reset = Math.Round(reset);
+                added.Key = key;
+                // A last line cut off mid-write would otherwise swallow this row.
+                File.AppendAllText(file, (EndsMidLine(file) ? "\r\n" : "") + Format(added));
+                if (new FileInfo(file).Length > TrimAt) TrimLocked(file, now);
+                return true;
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+    }
+
+    static bool EndsMidLine(string file)
+    {
+        if (!File.Exists(file)) return false;
+        using (FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            if (stream.Length == 0) return false;
+            stream.Seek(-1, SeekOrigin.End);
+            return stream.ReadByte() != '\n';
+        }
+    }
+
+    // Keeps the last 90 days and at most 30,000 rows, reading only the last 2 MB. Rewrites only when something goes.
+    internal static bool Trim(string file, double now)
+    {
+        lock (gate)
+        {
+            try
+            {
+                return TrimLocked(file, now);
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+    }
+
+    static bool TrimLocked(string file, double now)
+    {
+        if (!File.Exists(file)) return false;
+        long length = new FileInfo(file).Length;
+        List<string> lines = ReadTail(file, TrimAt);
+        List<Row> kept = new List<Row>();
+        foreach (string line in lines)
+        {
+            Row row = Parse(line, now);
+            if (row != null && now - row.Time <= MaxAgeSeconds) kept.Add(row);
+        }
+        if (kept.Count > MaxRows) kept.RemoveRange(0, kept.Count - MaxRows);
+        if (length <= TrimAt && kept.Count == lines.Count) return false;
+
+        StringBuilder text = new StringBuilder();
+        foreach (Row row in kept) text.Append(Format(row));
+        WidgetFiles.WriteAtomic(file, text.ToString());
+        return true;
+    }
+
+    // Every readable row, oldest first.
+    internal static List<Row> Read(string file)
+    {
+        List<Row> rows = new List<Row>();
+        lock (gate)
+        {
+            try
+            {
+                foreach (string line in ReadTail(file, TrimAt))
+                {
+                    Row row = Parse(line);
+                    if (row != null) rows.Add(row);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return rows;
+    }
+}
+
+// alert-state.txt: one line per account, "key,largest reset,70 fired,90 fired". Damaged lines are skipped.
+class AlertState
+{
+    internal class Entry
+    {
+        public double Largest;
+        public bool Fired70;
+        public bool Fired90;
+    }
+
+    readonly string file;
+    readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>();
+
+    public AlertState(string path)
+    {
+        file = path;
+        try
+        {
+            if (!File.Exists(file)) return;
+            foreach (string line in File.ReadAllLines(file))
+            {
+                string[] parts = line.Trim().Split(',');
+                double largest;
+                if (parts.Length != 4 || !Regex.IsMatch(parts[0], "^[0-9a-f]{16}\\z")) continue;
+                if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out largest) || double.IsNaN(largest) || double.IsInfinity(largest)) continue;
+                if ((parts[2] != "0" && parts[2] != "1") || (parts[3] != "0" && parts[3] != "1")) continue;
+                Entry entry = new Entry();
+                entry.Largest = Math.Max(0, largest);
+                entry.Fired70 = parts[2] == "1";
+                entry.Fired90 = parts[3] == "1";
+                entries[parts[0]] = entry;
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    public Entry Get(string key)
+    {
+        Entry entry;
+        return entries.TryGetValue(key, out entry) ? entry : null;
+    }
+
+    public void Put(string key, Entry entry)
+    {
+        entries[key] = entry;
+    }
+
+    public string Text()
+    {
+        StringBuilder text = new StringBuilder();
+        foreach (KeyValuePair<string, Entry> pair in entries)
+        {
+            text.Append(pair.Key).Append(',')
+                .Append(pair.Value.Largest.ToString("F0", CultureInfo.InvariantCulture)).Append(',')
+                .Append(pair.Value.Fired70 ? "1" : "0").Append(',')
+                .Append(pair.Value.Fired90 ? "1" : "0").Append("\r\n");
+        }
+        return text.ToString();
+    }
+
+    // False when the file couldn't be written. The state in memory still holds, so this session can't repeat a notice.
+    public bool Save()
+    {
+        try
+        {
+            WidgetFiles.WriteAtomic(file, Text());
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+}
+
+static class UsageAlerts
+{
+    // Decides the notice for one new 7-day figure and updates the account's entry (created on first sight).
+    // Returns null, or the title and text. Times are epoch seconds; the reset time shows in the given zone.
+    internal static string[] Evaluate(ref AlertState.Entry entry, double used, double resets, double now, TimeZoneInfo zone)
+    {
+        if (double.IsNaN(used)) return null;
+        DateTime? resetAt = ResetTimes.ToUtc(resets, new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(now));
+        if (!resetAt.HasValue) resets = 0;
+
+        // A saved file whose reset has already passed describes a period that's over.
+        if (resets > 0 && resets <= now) return null;
+
+        bool first = entry == null;
+        bool newPeriod = false;
+        if (first)
+        {
+            entry = new AlertState.Entry();
+            entry.Largest = Math.Max(0, resets);
+        }
+        else if (UsagePeriod.IsNew(entry.Largest, resets))
+        {
+            newPeriod = true;
+            entry.Largest = resets;
+            entry.Fired70 = false;
+            entry.Fired90 = false;
+        }
+        else if (resets > entry.Largest)
+        {
+            entry.Largest = resets;
+        }
+
+        // The same rounding as the card, so a notice agrees with the colors.
+        double shown = Math.Round(Math.Max(0, Math.Min(100, used)));
+        string title = null;
+        if (shown >= 90 && !entry.Fired90) title = "Claude usage at 90%";
+        else if (shown >= 70 && !entry.Fired70) title = "Claude usage at 70%";
+        if (shown >= 90) entry.Fired90 = true;
+        if (shown >= 70) entry.Fired70 = true;
+
+        string when = "";
+        if (resetAt.HasValue)
+        {
+            DateTime at = TimeZoneInfo.ConvertTimeFromUtc(resetAt.Value, zone);
+            when = " Resets " + at.ToString("ddd h:mm tt", CultureInfo.InvariantCulture) + ".";
+        }
+        if (title != null) return new[] { title, (newPeriod ? "Your 7-day limit has reset since the last check." : "7-day limit.") + when };
+        if (newPeriod) return new[] { "Claude 7-day limit has reset", "Usage is at " + shown.ToString(CultureInfo.InvariantCulture) + "%." + when };
+        return null;
+    }
+}
+
+// Shows one notice at a time. The next waits until the one before closes, or for Limit at most.
+class NoticeQueue
+{
+    internal TimeSpan Limit = TimeSpan.FromSeconds(30);
+    readonly Action<string, string, Action> show;
+    readonly Queue<string[]> waiting = new Queue<string[]>();
+    readonly DispatcherTimer timer = new DispatcherTimer();
+    int current;
+    int counter;
+
+    public NoticeQueue(Action<string, string, Action> show)
+    {
+        this.show = show;
+        timer.Tick += delegate { Done(current); };
+    }
+
+    internal int Waiting
+    {
+        get { return waiting.Count; }
+    }
+
+    internal bool Showing
+    {
+        get { return current != 0; }
+    }
+
+    public void Enqueue(string title, string text)
+    {
+        waiting.Enqueue(new[] { title, text });
+        if (current == 0) ShowNext();
+    }
+
+    void ShowNext()
+    {
+        while (current == 0 && waiting.Count > 0)
+        {
+            string[] notice = waiting.Dequeue();
+            int id = ++counter;
+            current = id;
+            timer.Interval = Limit;
+            timer.Start();
+            try
+            {
+                show(notice[0], notice[1], delegate { Done(id); });
+            }
+            catch (Exception)
+            {
+                // A notice that can't be shown, including System.Windows.Forms failing to load, is skipped.
+                if (current == id)
+                {
+                    timer.Stop();
+                    current = 0;
+                }
+            }
+        }
+    }
+
+    void Done(int id)
+    {
+        if (id == 0 || id != current) return;
+        timer.Stop();
+        current = 0;
+        ShowNext();
+    }
+}
+
+// A Windows tray balloon. Its icon is there only while a notice shows, and System.Windows.Forms loads only then.
+class TrayNotice
+{
+    readonly Action clicked;
+    IDisposable current;
+
+    public TrayNotice(Action clicked)
+    {
+        this.clicked = clicked;
+    }
+
+    public void Show(string title, string text, Action closed)
+    {
+        ShowBalloon(title, text, closed);
+    }
+
+    void ShowBalloon(string title, string text, Action closed)
+    {
+        Dispose();
+        System.Windows.Forms.NotifyIcon icon = new System.Windows.Forms.NotifyIcon();
+        current = icon;
+        bool finished = false;
+        DispatcherTimer limit = new DispatcherTimer();
+        Action finish = delegate
+        {
+            if (finished) return;
+            finished = true;
+            limit.Stop();
+            try
+            {
+                if (current == icon) current = null;
+                icon.Visible = false;
+                icon.Dispose();
+            }
+            catch (Exception) { }
+            if (closed != null) closed();
+        };
+        icon.BalloonTipClosed += delegate
+        {
+            try { finish(); }
+            catch (Exception) { }
+        };
+        icon.BalloonTipClicked += delegate
+        {
+            try
+            {
+                finish();
+                if (clicked != null) clicked();
+            }
+            catch (Exception) { }
+        };
+        limit.Interval = TimeSpan.FromSeconds(30);
+        limit.Tick += delegate
+        {
+            try { finish(); }
+            catch (Exception) { }
+        };
+        try
+        {
+            icon.Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetEntryAssembly().Location);
+            icon.Text = "Claude Account Widget";
+            icon.BalloonTipTitle = title;
+            icon.BalloonTipText = text;
+            icon.BalloonTipIcon = System.Windows.Forms.ToolTipIcon.None;
+            icon.Visible = true;
+            icon.ShowBalloonTip(30000);
+            limit.Start();
+        }
+        catch (Exception)
+        {
+            finished = true;
+            current = null;
+            icon.Dispose();
+            throw;
+        }
+    }
+
+    public void Dispose()
+    {
+        IDisposable icon = current;
+        current = null;
+        if (icon == null) return;
+        try { icon.Dispose(); }
+        catch (Exception) { }
+    }
+}
 
 class FetchResult
 {
@@ -92,10 +1047,7 @@ static class UsageClient
             string data = BuildUsageJson(body, account);
             if (data == null) return new FetchResult(FetchStatus.Failed);
 
-            string temp = usageFile + ".widget.tmp";
-            File.WriteAllText(temp, data);
-            if (File.Exists(usageFile)) File.Replace(temp, usageFile, null);
-            else File.Move(temp, usageFile);
+            WidgetFiles.WriteAtomic(usageFile, data);
             return new FetchResult(FetchStatus.Ok);
         }
         catch (WebException ex)
@@ -172,7 +1124,7 @@ static class UsageClient
         request.Timeout = 15000;
         request.ReadWriteTimeout = 15000;
         request.AllowAutoRedirect = false;
-        request.UserAgent = "ClaudeAccountWidget/1.0";
+        request.UserAgent = "ClaudeAccountWidget/" + Program.AppVersion;
         request.Accept = "application/json";
         request.Headers["Authorization"] = "Bearer " + token;
         request.Headers["anthropic-beta"] = "oauth-2025-04-20";
@@ -266,6 +1218,9 @@ class WidgetWindow : Window
     readonly TextBlock emptyNote = new TextBlock();
     readonly TextBlock updated = new TextBlock();
     readonly TextBlock checkNote = new TextBlock();
+    readonly TextBlock shortcutNote = new TextBlock();
+    readonly DockPanel updateLine = new DockPanel();
+    readonly TextBlock updateText = new TextBlock();
     readonly TextBlock refreshIcon = new TextBlock();
     readonly TextBlock eyeIcon = new TextBlock();
     readonly Border miniBadge = new Border();
@@ -318,6 +1273,8 @@ class WidgetWindow : Window
     const double HeroSize = 92;
     const double HeroRadius = 42.5;
     DateTime? sevenReset;
+    double sevenRaw = double.NaN;
+    readonly TextBlock forecastText = new TextBlock();
     double gaugeShown;
     double gaugeTarget = -1;
     Brush gaugeBrush;
@@ -482,8 +1439,29 @@ class WidgetWindow : Window
         Application.Current.Resources.MergedDictionaries.Add((ResourceDictionary)XamlReader.Parse(MenuXaml));
     }
 
-    public WidgetWindow(string dataDir, string accountPath, string credentialsPath, string url, int pollSeconds, int manualGapSeconds)
+    // Set by Program after construction. All null in tests, so nothing real can be shown, registered or sent.
+    internal Action<string, string, Action> ShowNotice;
+    internal IShortcutRegistrar ShortcutRegistrar;
+    internal string ReleasesUrl;
+
+    // Saved options, fields 6 to 8 of settings.txt.
+    internal bool alertsOn;
+    internal bool updateCheckOn = true;
+    internal string shortcutSetting = "off";
+
+    readonly bool testMode;
+    double lastUpdatedSeen = double.NaN;
+    SettingsWindow settingsWindow;
+    AlertState alertState;
+    string alertStateText;
+    NoticeQueue notices;
+    readonly string historyFile;
+    internal Task<bool> historyWrite;
+    UsageHistoryWindow historyWindow;
+
+    public WidgetWindow(string dataDir, string accountPath, string credentialsPath, string url, int pollSeconds, int manualGapSeconds, bool testMode = false)
     {
+        this.testMode = testMode;
         dataFolder = dataDir;
         credentialsFile = credentialsPath;
         usageUrl = url;
@@ -493,6 +1471,11 @@ class WidgetWindow : Window
         Directory.CreateDirectory(dataDir);
         usageFile = Path.Combine(dataDir, "usage.json");
         settingsFile = Path.Combine(dataDir, "settings.txt");
+        historyFile = Path.Combine(dataDir, "usage-history.csv");
+        updateFile = Path.Combine(dataDir, "update-check.txt");
+        string trimFile = historyFile;
+        double trimNow = Math.Floor((DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds);
+        historyWrite = Task.Run(() => UsageHistory.Trim(trimFile, trimNow));
         try
         {
             string expectedFile = Path.Combine(dataDir, "expected-account.txt");
@@ -559,6 +1542,28 @@ class WidgetWindow : Window
         pollTimer.Start();
         Loaded += delegate { FetchUsage(false); };
         Closed += delegate { ChatWindow.CloseAll(); };
+        SourceInitialized += delegate
+        {
+            System.Windows.Interop.HwndSource source = System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle);
+            if (source != null) source.AddHook(OnWindowMessage);
+            ApplySavedShortcut();
+        };
+        Closed += delegate { ReleaseShortcut(); };
+
+        // The first update check waits a minute after start (5 s in test mode, for hand tests), then the timer
+        // looks hourly for one that's due.
+        DispatcherTimer updateTimer = new DispatcherTimer();
+        updateTimer.Interval = TimeSpan.FromSeconds(testMode ? 5 : 60);
+        updateTimer.Tick += delegate
+        {
+            updateTimer.Interval = TimeSpan.FromHours(1);
+            CheckForUpdate();
+        };
+        Loaded += delegate
+        {
+            ShowUpdate();
+            updateTimer.Start();
+        };
     }
 
     UIElement BuildCard()
@@ -650,6 +1655,13 @@ class WidgetWindow : Window
         footer.Children.Add(updated);
         stack.Children.Add(footer);
         stack.Children.Add(checkNote);
+        shortcutNote.Foreground = Warn;
+        shortcutNote.FontSize = 11;
+        shortcutNote.TextWrapping = TextWrapping.Wrap;
+        shortcutNote.Margin = new Thickness(0, 2, 0, 0);
+        shortcutNote.Visibility = Visibility.Collapsed;
+        stack.Children.Add(shortcutNote);
+        stack.Children.Add(BuildUpdateLine());
 
         DropShadowEffect shadow = new DropShadowEffect();
         shadow.BlurRadius = 12;
@@ -760,11 +1772,18 @@ class WidgetWindow : Window
         paceRow.Children.Add(paceChip);
         paceRow.Children.Add(leftText);
 
+        forecastText.Foreground = Muted;
+        forecastText.FontSize = 11;
+        forecastText.Margin = new Thickness(0, 5, 0, 0);
+        forecastText.TextTrimming = TextTrimming.CharacterEllipsis;
+        forecastText.Visibility = Visibility.Collapsed;
+
         StackPanel words = new StackPanel();
         words.VerticalAlignment = VerticalAlignment.Center;
         words.Children.Add(name);
         words.Children.Add(row.Reset);
         words.Children.Add(paceRow);
+        words.Children.Add(forecastText);
 
         DockPanel line = new DockPanel();
         line.Children.Add(gauge);
@@ -859,6 +1878,11 @@ class WidgetWindow : Window
     void OpenChatWindow()
     {
         ChatWindow chat = new ChatWindow(dataFolder);
+        if (testMode)
+        {
+            ShowOffScreen(chat);
+            return;
+        }
 
         // Beside the widget when there's room, each new window stepping away from the last.
         Rect area = SystemParameters.WorkArea;
@@ -874,6 +1898,335 @@ class WidgetWindow : Window
         chat.Top = Math.Max(area.Top, Math.Min(Top + step, area.Bottom - chat.Height));
         chat.Show();
         chat.Activate();
+    }
+
+    [DllImport("user32.dll")]
+    static extern int GetWindowLong(IntPtr window, int index);
+
+    [DllImport("user32.dll")]
+    static extern int SetWindowLong(IntPtr window, int index, int value);
+
+    readonly string updateFile;
+    bool updateBusy;
+    string offeredLink;
+    // Tests replace opening the browser.
+    internal Action<string> OpenLink;
+    internal Task updateCheck;
+
+    UIElement BuildUpdateLine()
+    {
+        Border dismiss = new Border();
+        TextBlock dismissIcon = new TextBlock();
+        BuildHeaderButton(dismiss, dismissIcon, "\uE711", "Dismiss", -6);
+        dismissIcon.FontSize = 10;
+        dismiss.Width = 22;
+        dismiss.Height = 22;
+        dismiss.Margin = new Thickness(4, -2, -6, -2);
+        System.Windows.Automation.AutomationProperties.SetName(dismiss, "Dismiss update notice");
+        ChatWindow.MakeButton(dismiss, DismissUpdate);
+
+        updateText.FontSize = 11;
+        updateText.Foreground = Text;
+        updateText.TextDecorations = TextDecorations.Underline;
+        updateText.TextWrapping = TextWrapping.Wrap;
+        updateText.Cursor = Cursors.Hand;
+        updateText.VerticalAlignment = VerticalAlignment.Center;
+        updateText.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };
+        updateText.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+        {
+            e.Handled = true;
+            OpenUpdateLink();
+        };
+
+        updateLine.Margin = new Thickness(0, 4, 0, 0);
+        updateLine.Children.Add(dismiss);
+        updateLine.Children.Add(updateText);
+        updateLine.Visibility = Visibility.Collapsed;
+        return updateLine;
+    }
+
+    static double EpochNow()
+    {
+        return Math.Floor((DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds);
+    }
+
+    void ShowUpdate()
+    {
+        UpdateState state = UpdateState.Load(updateFile);
+        string offer = state.Offer(Program.AppVersion);
+        offeredLink = offer == null ? null : state.Link;
+        VersionTag tag = VersionTag.Parse(offer);
+        updateText.Text = tag == null ? "" : "Version " + tag.Text + " is available";
+        updateText.ToolTip = offeredLink;
+        updateLine.Visibility = tag == null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // At most one request a day, counting failed ones: the attempt is saved before the request goes out.
+    internal Task CheckForUpdate()
+    {
+        if (!updateCheckOn || ReleasesUrl == null || updateBusy) return null;
+        double now = EpochNow();
+        UpdateState state = UpdateState.Load(updateFile);
+        if (!state.Due(now)) return null;
+        state.Last = now;
+        if (!state.Save(updateFile)) return null;
+        updateBusy = true;
+        string url = ReleasesUrl;
+        string file = updateFile;
+        updateCheck = CheckInBackground(url, file);
+        return updateCheck;
+    }
+
+    async Task CheckInBackground(string url, string file)
+    {
+        string[] newest = await Task.Run(() => UpdateClient.Newest(UpdateClient.Download(url), Program.AppVersion));
+        updateBusy = false;
+        if (newest != null)
+        {
+            UpdateState state = UpdateState.Load(file);
+            state.Tag = newest[0];
+            state.Link = newest[1];
+            state.Save(file);
+        }
+        ShowUpdate();
+    }
+
+    // The link is checked again on click, in case the file changed since it was shown.
+    void OpenUpdateLink()
+    {
+        UpdateState state = UpdateState.Load(updateFile);
+        if (state.Offer(Program.AppVersion) == null || state.Link != offeredLink || !UpdateClient.IsReleaseLink(state.Link)) return;
+        if (OpenLink != null)
+        {
+            OpenLink(state.Link);
+            return;
+        }
+        try
+        {
+            ProcessStartInfo start = new ProcessStartInfo(new Uri(state.Link).AbsoluteUri);
+            start.UseShellExecute = true;
+            Process.Start(start);
+        }
+        catch (System.ComponentModel.Win32Exception) { }
+        catch (InvalidOperationException) { }
+        catch (UriFormatException) { }
+    }
+
+    void DismissUpdate()
+    {
+        UpdateState state = UpdateState.Load(updateFile);
+        if (state.Tag != null) state.Dismissed = state.Tag;
+        state.Save(updateFile);
+        ShowUpdate();
+    }
+
+    internal void SetUpdateCheck(bool on)
+    {
+        updateCheckOn = on;
+        SaveSettings();
+    }
+
+    const int HotKeyMessage = 0x0312;
+    int shortcutId;
+    IntPtr shortcutWindow;
+
+    IntPtr OnWindowMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (message == HotKeyMessage && shortcutId != 0 && wParam.ToInt32() == shortcutId)
+        {
+            handled = true;
+            OpenChatWindow();
+        }
+        return IntPtr.Zero;
+    }
+
+    void ApplySavedShortcut()
+    {
+        if (shortcutSetting == "off") return;
+        string problem = RegisterShortcut(shortcutSetting);
+        if (problem != null) ShowShortcutNote(problem);
+    }
+
+    void ShowShortcutNote(string text)
+    {
+        shortcutNote.Text = text ?? "";
+        shortcutNote.Visibility = shortcutNote.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Registers the new shortcut before releasing the old one, so a failure keeps the old one. Returns null, or why not.
+    string RegisterShortcut(string text)
+    {
+        uint modifiers;
+        Key key;
+        if (!ShortcutText.TryParse(text, out modifiers, out key)) return "The saved chat shortcut isn't valid. Choose another in Settings.";
+        if (ShortcutRegistrar == null) return null;
+        IntPtr handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return null;
+        int id = shortcutId == 1 ? 2 : 1;
+        int error = ShortcutRegistrar.Register(handle, id, modifiers, (uint)KeyInterop.VirtualKeyFromKey(key));
+        if (error != 0)
+        {
+            string shown = ShortcutText.Display(text);
+            return error == 1409
+                ? "The chat shortcut " + shown + " is in use by another app. Choose another in Settings."
+                : "Couldn't set the chat shortcut " + shown + " (Windows error " + error.ToString(CultureInfo.InvariantCulture) + ").";
+        }
+        if (shortcutId != 0) ShortcutRegistrar.Unregister(handle, shortcutId);
+        shortcutId = id;
+        shortcutWindow = handle;
+        return null;
+    }
+
+    // Uses the handle it was registered with, because by Closed the window's handle is already gone.
+    void ReleaseShortcut()
+    {
+        if (shortcutId == 0 || ShortcutRegistrar == null) return;
+        ShortcutRegistrar.Unregister(shortcutWindow, shortcutId);
+        shortcutId = 0;
+    }
+
+    // From Settings. "off" releases it. On failure the old shortcut and setting stay, and the reason is returned.
+    internal string SetShortcut(string text)
+    {
+        if (text == "off")
+        {
+            ReleaseShortcut();
+            shortcutSetting = "off";
+            SaveSettings();
+            ShowShortcutNote(null);
+            return null;
+        }
+        // Windows refuses a second registration of the same keys, so setting the current shortcut again changes nothing.
+        if (text == shortcutSetting && shortcutId != 0)
+        {
+            ShowShortcutNote(null);
+            return null;
+        }
+        string problem = RegisterShortcut(text);
+        if (problem != null) return problem;
+        shortcutSetting = text;
+        SaveSettings();
+        ShowShortcutNote(null);
+        return null;
+    }
+
+    // Only one Settings window. Opening it again brings the open one forward.
+    void OpenSettings()
+    {
+        if (settingsWindow != null)
+        {
+            if (!testMode)
+            {
+                if (settingsWindow.WindowState == WindowState.Minimized) settingsWindow.WindowState = WindowState.Normal;
+                settingsWindow.Activate();
+            }
+            return;
+        }
+        settingsWindow = new SettingsWindow(this, dataFolder);
+        settingsWindow.Closed += delegate { settingsWindow = null; };
+        if (testMode)
+        {
+            ShowOffScreen(settingsWindow);
+            return;
+        }
+        PlaceBeside(settingsWindow);
+        settingsWindow.Show();
+        settingsWindow.Activate();
+    }
+
+    // Only one history window. Opening it again brings the open one forward with fresh data.
+    void OpenHistory()
+    {
+        if (historyWindow != null)
+        {
+            historyWindow.Reload();
+            if (!testMode)
+            {
+                if (historyWindow.WindowState == WindowState.Minimized) historyWindow.WindowState = WindowState.Normal;
+                historyWindow.Activate();
+            }
+            return;
+        }
+        historyWindow = new UsageHistoryWindow(this, historyFile);
+        historyWindow.Closed += delegate { historyWindow = null; };
+        if (testMode)
+        {
+            ShowOffScreen(historyWindow);
+            return;
+        }
+        PlaceBeside(historyWindow);
+        historyWindow.Show();
+        historyWindow.Activate();
+    }
+
+    internal static Brush WarnBrush
+    {
+        get { return Warn; }
+    }
+
+    internal static Brush DangerBrush
+    {
+        get { return Danger; }
+    }
+
+    // The signed-in account's history key, or null when nobody is signed in.
+    internal string SignedInKey
+    {
+        get { return accountKnown && account.Length > 0 ? AccountKeys.Of(account) : null; }
+    }
+
+    // Beside the widget when there's room, otherwise on whichever side fits, kept on the screen.
+    void PlaceBeside(Window window)
+    {
+        Rect area = SystemParameters.WorkArea;
+        if (!area.Contains(new Point(Left + ActualWidth / 2, Top + ActualHeight / 2)))
+        {
+            area = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+        }
+        double left = Left - window.Width - 4;
+        if (left < area.Left) left = Left + ActualWidth + 4;
+        window.Left = Math.Max(area.Left, Math.Min(left, area.Right - window.Width));
+        window.Top = Math.Max(area.Top, Math.Min(Top, area.Bottom - window.MaxHeight));
+    }
+
+    // Saves or clears the wrong-account warning and applies it at once. Errors go to the caller.
+    internal void SetExpectedAccount(string email)
+    {
+        string file = Path.Combine(dataFolder, "expected-account.txt");
+        email = email.Trim();
+        if (email.Length == 0)
+        {
+            if (File.Exists(file)) File.Delete(file);
+        }
+        else
+        {
+            WidgetFiles.WriteAtomic(file, email);
+        }
+        expectedAccount = email;
+        Refresh();
+    }
+
+    internal string ExpectedAccount
+    {
+        get { return expectedAccount; }
+    }
+
+    // Test mode keeps every window it opens off screen, and stops it taking focus even when it focuses its own controls.
+    static void ShowOffScreen(Window window)
+    {
+        window.WindowStartupLocation = WindowStartupLocation.Manual;
+        window.Left = -6000;
+        window.Top = 0;
+        window.ShowActivated = false;
+        window.SourceInitialized += delegate
+        {
+            const int ExStyle = -20;
+            const int NoActivate = 0x08000000;
+            IntPtr handle = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+            SetWindowLong(handle, ExStyle, GetWindowLong(handle, ExStyle) | NoActivate);
+        };
+        window.Show();
     }
 
     void BuildRefreshIcon()
@@ -1028,8 +2381,42 @@ class WidgetWindow : Window
         SetArc(heroArc, HeroSize, HeroRadius, percent, gaugeBrush);
     }
 
+    // When the limit would be reached at the average pace so far, or null to hide the line. Rules apply from the
+    // top and the first match wins. Assumes the window started exactly 7 days before it resets.
+    internal static string ForecastText(double used, DateTime resetUtc, DateTime nowUtc, TimeZoneInfo zone)
+    {
+        if (double.IsNaN(used) || resetUtc <= nowUtc) return null;
+        double clamped = Math.Max(0, Math.Min(100, used));
+        if (Math.Round(clamped) >= 100) return "Limit reached";
+
+        double elapsedHours = (nowUtc - resetUtc.AddDays(-7)).TotalHours;
+        if (elapsedHours < 12 || clamped < 5) return null;
+
+        double hoursToFull = (100 - clamped) / (clamped / elapsedHours);
+        DateTime fullAt = nowUtc.AddHours(hoursToFull);
+        if (fullAt >= resetUtc) return "Lasts until reset";
+
+        TimeSpan left = fullAt - nowUtc;
+        if (left.TotalHours >= 24)
+        {
+            return "Full by " + TimeZoneInfo.ConvertTimeFromUtc(fullAt, zone).ToString("ddd h:mm tt", CultureInfo.InvariantCulture);
+        }
+        if (left.TotalHours >= 1)
+        {
+            return string.Format(CultureInfo.InvariantCulture, "Full in {0}h {1}m", (int)left.TotalHours, left.Minutes);
+        }
+        // Whole minutes, rounded up, so 59m 30s left reads as an hour rather than "60m".
+        int minutes = Math.Max(1, (int)Math.Ceiling(left.TotalMinutes));
+        if (minutes >= 60) return "Full in 1h 0m";
+        return string.Format(CultureInfo.InvariantCulture, "Full in {0}m", minutes);
+    }
+
     void UpdatePace(bool known, double used)
     {
+        string forecast = known && sevenReset.HasValue ? ForecastText(sevenRaw, sevenReset.Value, DateTime.UtcNow, TimeZoneInfo.Local) : null;
+        forecastText.Text = forecast ?? "";
+        forecastText.Visibility = forecast == null ? Visibility.Collapsed : Visibility.Visible;
+
         bool show = known && sevenReset.HasValue;
         paceChip.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         leftText.Visibility = known ? Visibility.Visible : Visibility.Collapsed;
@@ -1350,6 +2737,93 @@ class WidgetWindow : Window
         fetching = false;
         ApplyResult(result);
         Refresh();
+        if (result.Status == FetchStatus.Ok) AfterSuccessfulCheck();
+    }
+
+    // Runs after each usage check that wrote a new file.
+    void AfterSuccessfulCheck()
+    {
+        RecordHistory();
+    }
+
+    // The row's account comes from the usage file itself, so a sign-in change during the check can't mislabel it.
+    // The write runs off the UI thread; tests wait on historyWrite.
+    void RecordHistory()
+    {
+        string text;
+        try
+        {
+            text = ReadShared(usageFile);
+        }
+        catch (IOException) { return; }
+        catch (UnauthorizedAccessException) { return; }
+        string forAccount = ReadString(text, "account");
+        Match seven = Regex.Match(text, "\"seven_day\"\\s*:\\s*\\{([^{}]*)\\}");
+        if (forAccount.Length == 0 || !seven.Success) return;
+        double used = ReadNumber(seven.Groups[1].Value, "used");
+        if (double.IsNaN(used) || double.IsInfinity(used)) return;
+        DateTime nowUtc = DateTime.UtcNow;
+        DateTime? reset = ResetTimes.ToUtc(ReadNumber(seven.Groups[1].Value, "resets"), nowUtc);
+        double epoch = (nowUtc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        double resets = reset.HasValue ? (reset.Value - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds : 0;
+        string key = AccountKeys.Of(forAccount);
+        string file = historyFile;
+        historyWrite = Task.Run(() => UsageHistory.Append(file, Math.Floor(epoch), used, resets, key));
+    }
+
+    // Runs once for each new usage file for the signed-in account, from either writer.
+    void OnUsageUpdated(string text)
+    {
+        CheckAlerts(text);
+    }
+
+    // State is saved before a notice shows, so a crash after a good save can lose a notice but not repeat it.
+    // If the save fails, the notice still shows and the state in memory stops a repeat in this session, but a
+    // restart before the next good save can show it once more. With alerts off the state still moves on, so
+    // turning them on doesn't replay old crossings.
+    void CheckAlerts(string text)
+    {
+        string forAccount = ReadString(text, "account");
+        Match seven = Regex.Match(text, "\"seven_day\"\\s*:\\s*\\{([^{}]*)\\}");
+        if (forAccount.Length == 0 || !seven.Success) return;
+        double used = ReadNumber(seven.Groups[1].Value, "used");
+        double resets = ReadNumber(seven.Groups[1].Value, "resets");
+        if (double.IsNaN(resets)) resets = 0;
+
+        if (alertState == null)
+        {
+            alertState = new AlertState(Path.Combine(dataFolder, "alert-state.txt"));
+            alertStateText = alertState.Text();
+        }
+        string key = AccountKeys.Of(forAccount);
+        AlertState.Entry entry = alertState.Get(key);
+        double now = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        string[] notice = UsageAlerts.Evaluate(ref entry, used, resets, now, TimeZoneInfo.Local);
+        if (entry == null) return;
+        alertState.Put(key, entry);
+        string changed = alertState.Text();
+        if (changed != alertStateText)
+        {
+            alertStateText = changed;
+            alertState.Save();
+        }
+
+        if (notice == null || !alertsOn || ShowNotice == null) return;
+        if (notices == null) notices = new NoticeQueue(ShowNotice);
+        notices.Enqueue(notice[0], notice[1]);
+    }
+
+    // A click on a notice brings the full card forward.
+    internal void BringForward()
+    {
+        if (collapsed) Expand();
+        Activate();
+    }
+
+    internal void SetAlerts(bool on)
+    {
+        alertsOn = on;
+        SaveSettings();
     }
 
     void ApplyResult(FetchResult result)
@@ -1439,6 +2913,14 @@ class WidgetWindow : Window
         startupItem.IsChecked = IsStartupEnabled();
         startupItem.Click += delegate { SetStartup(startupItem.IsChecked); };
 
+        MenuItem settings = new MenuItem();
+        settings.Header = "Settings";
+        settings.Click += delegate { OpenSettings(); };
+
+        MenuItem history = new MenuItem();
+        history.Header = "Usage history";
+        history.Click += delegate { OpenHistory(); };
+
         MenuItem refresh = new MenuItem();
         refresh.Header = "Refresh now";
         refresh.Click += delegate { RefreshNow(); };
@@ -1453,6 +2935,8 @@ class WidgetWindow : Window
         menu.Items.Add(topmostItem);
         menu.Items.Add(startupItem);
         menu.Items.Add(accentItem);
+        menu.Items.Add(history);
+        menu.Items.Add(settings);
         menu.Items.Add(refresh);
         menu.Items.Add(new Separator());
         menu.Items.Add(exit);
@@ -1562,10 +3046,22 @@ class WidgetWindow : Window
         catch (UnauthorizedAccessException) { }
 
         sevenReset = null;
+        sevenRaw = double.NaN;
         bool usable = text != null
             && accountKnown
             && account.Length > 0
             && string.Equals(ReadString(text, "account"), account, StringComparison.OrdinalIgnoreCase);
+
+        // Waits until Program has set up notices, so the first refresh in the constructor can't use up a new file.
+        if (usable && ShowNotice != null)
+        {
+            double updatedValue = ReadNumber(text, "updated");
+            if (!double.IsNaN(updatedValue) && updatedValue != lastUpdatedSeen)
+            {
+                lastUpdatedSeen = updatedValue;
+                OnUsageUpdated(text);
+            }
+        }
 
         bool hasFive = usable && ShowWindow(fiveHour, text, "five_hour");
         bool hasSeven = usable && ShowWindow(sevenDay, text, "seven_day");
@@ -1638,9 +3134,11 @@ class WidgetWindow : Window
         if (double.IsNaN(used)) return false;
 
         DateTime now = DateTime.UtcNow;
-        bool hasReset = !double.IsNaN(resets) && resets > 0;
-        DateTime resetAt = hasReset ? new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(resets) : now;
+        DateTime? checkedReset = ResetTimes.ToUtc(resets, now);
+        bool hasReset = checkedReset.HasValue;
+        DateTime resetAt = checkedReset ?? now;
         if (row == sevenDay && hasReset && resetAt > now) sevenReset = resetAt;
+        if (row == sevenDay && !(hasReset && resetAt <= now)) sevenRaw = used;
 
         if (hasReset && resetAt <= now)
         {
@@ -1682,8 +3180,9 @@ class WidgetWindow : Window
 
     static string Ago(double epochMs)
     {
-        if (double.IsNaN(epochMs)) return "time unknown";
-        DateTime then = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(epochMs);
+        DateTime? checkedThen = UpdatedTimes.ToUtc(epochMs, DateTime.UtcNow);
+        if (!checkedThen.HasValue) return "time unknown";
+        DateTime then = checkedThen.Value;
         TimeSpan age = DateTime.UtcNow - then;
         if (age.TotalMinutes < 1) return "just now";
         if (age.TotalHours < 1) return string.Format(CultureInfo.InvariantCulture, "{0} min ago", (int)age.TotalMinutes);
@@ -1722,6 +3221,9 @@ class WidgetWindow : Window
             startCollapsed = parts.Length > 3 && parts[3] == "1";
             if (parts.Length > 4) accentName = parts[4];
             if (parts.Length > 5) themeSetting = parts[5];
+            if (parts.Length > 6) alertsOn = parts[6] == "1";
+            if (parts.Length > 7) updateCheckOn = parts[7] != "0";
+            if (parts.Length > 8 && parts[8].Length > 0) shortcutSetting = parts[8];
         }
         catch (Exception)
         {
@@ -1736,19 +3238,23 @@ class WidgetWindow : Window
             && left < SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth - 40
             && top < SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - 40;
 
-        Left = onScreen ? left : area.Right - Width - 20;
-        Top = onScreen ? top : area.Top + 20;
+        // Test mode keeps a saved position as it is, even off screen.
+        bool keep = onScreen || (testMode && !double.IsNaN(left) && !double.IsNaN(top));
+        Left = keep ? left : area.Right - Width - 20;
+        Top = keep ? top : area.Top + 20;
         topmostItem.IsChecked = Topmost;
         if (startCollapsed) Collapse(false);
     }
 
-    void SaveSettings()
+    internal void SaveSettings()
     {
         try
         {
             // Always stores the full card's position, so it reopens in the same place.
             double savedLeft = collapsed ? Left + Width - FullWidth : Left;
-            File.WriteAllText(settingsFile, string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3},{4},{5}", savedLeft, Top, Topmost ? "1" : "0", collapsed ? "1" : "0", accentName, themeSetting));
+            WidgetFiles.WriteAtomic(settingsFile, string.Format(CultureInfo.InvariantCulture, "{0},{1},{2},{3},{4},{5},{6},{7},{8}",
+                savedLeft, Top, Topmost ? "1" : "0", collapsed ? "1" : "0", accentName, themeSetting,
+                alertsOn ? "1" : "0", updateCheckOn ? "1" : "0", shortcutSetting));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -2368,7 +3874,9 @@ class ChatClient
     {
         if (!request.Laptop || (tool != "Write" && tool != "Edit")) return false;
         string path = Field(input, "file_path");
-        if (path.Length == 0 || !Path.IsPathRooted(path)) return false;
+
+        // A drive-relative path such as C:x would be judged against this process's current folder, not Claude's.
+        if (path.Length == 0 || !SettingPaths.IsFull(path)) return false;
 
         bool inDefault = IsInside(path, request.DefaultOutputFolder);
         string folder = request.CurrentOutputFolder();
@@ -2724,6 +4232,1033 @@ class ChatNoteWriter
 }
 
 // The modern Windows folder picker. The .NET FolderBrowserDialog wraps a much older one.
+// The signed-in account's 7-day usage: the current period as a line against the pace line, and the peak of
+// each of the last 8 periods as bars. Shapes are plain WPF and are drawn again when the theme changes.
+class UsageHistoryWindow : Window
+{
+    internal const double ChartWidth = 360;
+    internal const double ChartHeight = 150;
+    const double BarHeight = 56;
+
+    internal class Period
+    {
+        public double Reset;
+        // When the period ended: its reset, or the next period's start if that came first. 0 when unknown.
+        public double End;
+        public List<UsageHistory.Row> Rows = new List<UsageHistory.Row>();
+        public double Peak;
+    }
+
+    readonly WidgetWindow widget;
+    readonly string historyFile;
+    readonly Border card = new Border();
+    readonly TextBlock subtitle = new TextBlock();
+    readonly Canvas chart = new Canvas();
+    readonly Canvas bars = new Canvas();
+    readonly TextBlock emptyNote = new TextBlock();
+    readonly TextBlock barsTitle = new TextBlock();
+    readonly StackPanel chartArea = new StackPanel();
+    List<UsageHistory.Row> rows = new List<UsageHistory.Row>();
+
+    // Tests set the clock.
+    internal Func<DateTime> Now = delegate { return DateTime.UtcNow; };
+
+    public UsageHistoryWindow(WidgetWindow owner, string file)
+    {
+        widget = owner;
+        historyFile = file;
+        Title = "Claude usage history";
+        Width = 440;
+        SizeToContent = SizeToContent.Height;
+        MaxHeight = 720;
+        WindowStyle = WindowStyle.None;
+        AllowsTransparency = true;
+        Background = Brushes.Transparent;
+        ResizeMode = ResizeMode.NoResize;
+        ShowInTaskbar = true;
+        FontFamily = new FontFamily("Segoe UI");
+        WindowStartupLocation = WindowStartupLocation.Manual;
+
+        Content = BuildCard();
+        WidgetWindow.AppearanceChanged += Draw;
+        Closed += delegate { WidgetWindow.AppearanceChanged -= Draw; };
+        PreviewKeyDown += delegate(object s, KeyEventArgs e)
+        {
+            if (e.Key != Key.Escape) return;
+            e.Handled = true;
+            Close();
+        };
+        Reload();
+    }
+
+    internal void Reload()
+    {
+        rows = UsageHistory.Read(historyFile);
+        Draw();
+    }
+
+    // Splits one account's rows into periods by the same rule as the alerts: a reset time an hour or more past
+    // the largest seen so far starts a new period. A reset of 0 stays in the period it's in.
+    internal static List<Period> Periods(List<UsageHistory.Row> all, string key)
+    {
+        List<Period> periods = new List<Period>();
+        double largest = 0;
+        Period current = null;
+        List<UsageHistory.Row> mine = new List<UsageHistory.Row>();
+        foreach (UsageHistory.Row row in all)
+        {
+            if (row.Key == key) mine.Add(row);
+        }
+        // A stable sort by time, so rows with the same time keep their file order.
+        List<KeyValuePair<int, UsageHistory.Row>> order = new List<KeyValuePair<int, UsageHistory.Row>>();
+        for (int i = 0; i < mine.Count; i++) order.Add(new KeyValuePair<int, UsageHistory.Row>(i, mine[i]));
+        order.Sort(delegate(KeyValuePair<int, UsageHistory.Row> a, KeyValuePair<int, UsageHistory.Row> b)
+        {
+            int byTime = a.Value.Time.CompareTo(b.Value.Time);
+            return byTime != 0 ? byTime : a.Key.CompareTo(b.Key);
+        });
+        foreach (KeyValuePair<int, UsageHistory.Row> pair in order)
+        {
+            UsageHistory.Row row = pair.Value;
+            if (current == null || UsagePeriod.IsNew(largest, row.Reset))
+            {
+                current = new Period();
+                periods.Add(current);
+            }
+            largest = Math.Max(largest, row.Reset);
+            current.Reset = Math.Max(current.Reset, row.Reset);
+            current.Rows.Add(row);
+            current.Peak = Math.Max(current.Peak, Math.Max(0, Math.Min(100, row.Percent)));
+        }
+        for (int i = 0; i < periods.Count; i++)
+        {
+            double end = periods[i].Reset;
+            if (i + 1 < periods.Count && periods[i + 1].Reset > 0)
+            {
+                double nextStart = periods[i + 1].Reset - 7 * 86400;
+                end = end > 0 ? Math.Min(end, nextStart) : nextStart;
+            }
+            periods[i].End = end;
+        }
+        return periods;
+    }
+
+    UIElement BuildCard()
+    {
+        StackPanel stack = new StackPanel();
+
+        Border closeButton = new Border();
+        TextBlock closeIcon = new TextBlock();
+        WidgetWindow.BuildHeaderButton(closeButton, closeIcon, "\uE711", "Close", -6);
+        System.Windows.Automation.AutomationProperties.SetName(closeButton, "Close");
+        ChatWindow.MakeButton(closeButton, Close);
+        Shapes.Path spark = WidgetWindow.BuildSpark(16);
+        spark.Margin = new Thickness(0, 0, 8, 0);
+        DockPanel.SetDock(spark, Dock.Left);
+        TextBlock title = new TextBlock();
+        title.Text = "Usage history";
+        title.FontSize = 13;
+        title.FontWeight = FontWeights.SemiBold;
+        title.Foreground = WidgetWindow.Text;
+        title.VerticalAlignment = VerticalAlignment.Center;
+        DockPanel header = new DockPanel();
+        header.Background = Brushes.Transparent;
+        header.Margin = new Thickness(0, 0, 0, 8);
+        header.Children.Add(closeButton);
+        header.Children.Add(spark);
+        header.Children.Add(title);
+        header.MouseLeftButtonDown += delegate { DragMove(); };
+        stack.Children.Add(header);
+
+        TextBlock periodTitle = new TextBlock();
+        periodTitle.Text = "This 7-day period";
+        periodTitle.FontSize = 12;
+        periodTitle.FontWeight = FontWeights.SemiBold;
+        periodTitle.Foreground = WidgetWindow.Text;
+        stack.Children.Add(periodTitle);
+        subtitle.FontSize = 11;
+        subtitle.Foreground = WidgetWindow.Muted;
+        subtitle.Margin = new Thickness(0, 2, 0, 8);
+        stack.Children.Add(subtitle);
+
+        emptyNote.Text = "No history yet. It starts after the next usage check.";
+        emptyNote.FontSize = 12;
+        emptyNote.Foreground = WidgetWindow.Muted;
+        emptyNote.TextWrapping = TextWrapping.Wrap;
+        emptyNote.Margin = new Thickness(0, 4, 0, 4);
+        stack.Children.Add(emptyNote);
+
+        chart.Width = ChartWidth + 34;
+        chart.Height = ChartHeight + 22;
+        chart.ClipToBounds = true;
+        chartArea.Children.Add(chart);
+        barsTitle.Text = "Peak of earlier periods";
+        barsTitle.FontSize = 12;
+        barsTitle.FontWeight = FontWeights.SemiBold;
+        barsTitle.Foreground = WidgetWindow.Text;
+        barsTitle.Margin = new Thickness(0, 14, 0, 6);
+        chartArea.Children.Add(barsTitle);
+        bars.Width = ChartWidth + 34;
+        bars.Height = BarHeight + 34;
+        chartArea.Children.Add(bars);
+        stack.Children.Add(chartArea);
+
+        TextBlock note = new TextBlock();
+        note.Text = "The dashed line is an even pace that would reach 100% at the reset. History is kept for 90 days.";
+        note.FontSize = 11;
+        note.Foreground = WidgetWindow.Muted;
+        note.TextWrapping = TextWrapping.Wrap;
+        note.Margin = new Thickness(0, 10, 0, 0);
+        stack.Children.Add(note);
+
+        DropShadowEffect shadow = new DropShadowEffect();
+        shadow.BlurRadius = 12;
+        shadow.ShadowDepth = 2;
+        shadow.Direction = 270;
+        shadow.Opacity = 0.5;
+        card.Margin = new Thickness(8);
+        card.BorderBrush = WidgetWindow.CardEdge;
+        card.BorderThickness = new Thickness(1);
+        card.CornerRadius = new CornerRadius(16);
+        card.Padding = new Thickness(16, 10, 16, 14);
+        card.Effect = shadow;
+        card.Child = stack;
+        return card;
+    }
+
+    // Times come from a file, so they go through the same guard as the card's reset time.
+    static string Local(double epoch, string format)
+    {
+        DateTime? at = ResetTimes.ToUtc(epoch, DateTime.UtcNow);
+        return at.HasValue ? at.Value.ToLocalTime().ToString(format, CultureInfo.InvariantCulture) : "?";
+    }
+
+    Brush LineBrush()
+    {
+        System.Windows.Media.Color? accent = WidgetWindow.AccentColor;
+        return accent.HasValue ? (Brush)new SolidColorBrush(accent.Value) : WidgetWindow.Text;
+    }
+
+    TextBlock Label(string text, double size, Brush color)
+    {
+        TextBlock block = new TextBlock();
+        block.Text = text;
+        block.FontSize = size;
+        block.Foreground = color;
+        return block;
+    }
+
+    static void Place(UIElement element, double left, double top)
+    {
+        Canvas.SetLeft(element, left);
+        Canvas.SetTop(element, top);
+    }
+
+    internal void Draw()
+    {
+        card.Background = WidgetWindow.CardFill(WidgetWindow.IsLight);
+        chart.Children.Clear();
+        bars.Children.Clear();
+
+        string key = widget.SignedInKey;
+        List<Period> periods = key == null ? new List<Period>() : Periods(rows, key);
+        double now = (Now() - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        Period last = periods.Count > 0 ? periods[periods.Count - 1] : null;
+        Period current = last != null && last.Reset > now ? last : null;
+        // Rows with no reset time can't be placed on the 7-day axis.
+        bool undated = last != null && last.Reset == 0;
+        List<Period> earlier = new List<Period>();
+        foreach (Period period in periods)
+        {
+            // Only periods that have ended, with a known end.
+            if (period != current && period.End > 0 && period.End <= now) earlier.Add(period);
+        }
+        if (earlier.Count > 8) earlier = earlier.GetRange(earlier.Count - 8, 8);
+
+        bool any = current != null || undated || earlier.Count > 0;
+        emptyNote.Visibility = any ? Visibility.Collapsed : Visibility.Visible;
+        chartArea.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+        subtitle.Text = current != null ? "Resets " + Local(current.Reset, "ddd MMM d, h:mm tt")
+            : undated ? "Anthropic hasn't reported a reset time for this period, so it can't be drawn yet."
+            : any ? "No usage recorded since the last reset." : "";
+        subtitle.Visibility = subtitle.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (!any) return;
+
+        DrawCurrent(current);
+        DrawBars(earlier);
+    }
+
+    void DrawCurrent(Period current)
+    {
+        const double left = 30;
+        Brush grid = WidgetWindow.OverlayMid;
+        foreach (int percent in new[] { 0, 50, 100 })
+        {
+            double y = ChartHeight - percent / 100.0 * ChartHeight + 4;
+            Shapes.Line line = new Shapes.Line();
+            line.X1 = left; line.X2 = left + ChartWidth; line.Y1 = y; line.Y2 = y;
+            line.Stroke = grid;
+            line.StrokeThickness = 1;
+            chart.Children.Add(line);
+            TextBlock label = Label(percent + "%", 10, WidgetWindow.Muted);
+            Place(label, 0, y - 7);
+            chart.Children.Add(label);
+        }
+        if (current == null) return;
+
+        double end = current.Reset;
+        double start = end - 7 * 86400;
+        Shapes.Line pace = new Shapes.Line();
+        pace.X1 = left; pace.Y1 = ChartHeight + 4; pace.X2 = left + ChartWidth; pace.Y2 = 4;
+        pace.Stroke = WidgetWindow.Muted;
+        pace.StrokeThickness = 1;
+        pace.StrokeDashArray = new DoubleCollection(new double[] { 4, 3 });
+        chart.Children.Add(pace);
+
+        TextBlock startLabel = Label(Local(start, "ddd"), 10, WidgetWindow.Muted);
+        Place(startLabel, left, ChartHeight + 7);
+        chart.Children.Add(startLabel);
+        TextBlock endLabel = Label(Local(end, "ddd"), 10, WidgetWindow.Muted);
+        Place(endLabel, left + ChartWidth - 22, ChartHeight + 7);
+        chart.Children.Add(endLabel);
+
+        PointCollection points = new PointCollection();
+        foreach (UsageHistory.Row row in current.Rows)
+        {
+            if (row.Time < start || row.Time > end) continue;
+            double x = left + (row.Time - start) / (end - start) * ChartWidth;
+            double y = ChartHeight - Math.Max(0, Math.Min(100, row.Percent)) / 100 * ChartHeight + 4;
+            points.Add(new Point(x, y));
+        }
+        if (points.Count == 0) return;
+        Brush brush = LineBrush();
+        if (points.Count > 1)
+        {
+            Shapes.Polyline line = new Shapes.Polyline();
+            line.Points = points;
+            line.Stroke = brush;
+            line.StrokeThickness = 2;
+            line.StrokeLineJoin = PenLineJoin.Round;
+            chart.Children.Add(line);
+        }
+        Point last = points[points.Count - 1];
+        Shapes.Ellipse dot = new Shapes.Ellipse();
+        dot.Width = 7; dot.Height = 7;
+        dot.Fill = brush;
+        Place(dot, last.X - 3.5, last.Y - 3.5);
+        chart.Children.Add(dot);
+        UsageHistory.Row lastRow = null;
+        foreach (UsageHistory.Row row in current.Rows)
+        {
+            if (row.Time >= start && row.Time <= end) lastRow = row;
+        }
+        TextBlock value = Label(Math.Round(Math.Max(0, Math.Min(100, lastRow.Percent))).ToString(CultureInfo.InvariantCulture) + "%", 11, WidgetWindow.Text);
+        value.FontWeight = FontWeights.SemiBold;
+        Place(value, Math.Min(last.X + 6, left + ChartWidth - 28), Math.Max(0, last.Y - 18));
+        chart.Children.Add(value);
+    }
+
+    void DrawBars(List<Period> earlier)
+    {
+        barsTitle.Visibility = earlier.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        bars.Visibility = barsTitle.Visibility;
+        const double left = 30;
+        double slot = ChartWidth / 8;
+        for (int i = 0; i < earlier.Count; i++)
+        {
+            Period period = earlier[i];
+            double height = Math.Max(2, period.Peak / 100 * BarHeight);
+            double x = left + i * slot + slot * 0.2;
+            Border bar = new Border();
+            bar.Width = slot * 0.6;
+            bar.Height = height;
+            bar.CornerRadius = new CornerRadius(3, 3, 0, 0);
+            // The same colors as the card at 70% and 90%.
+            bar.Background = Math.Round(period.Peak) >= 90 ? WidgetWindow.DangerBrush : Math.Round(period.Peak) >= 70 ? WidgetWindow.WarnBrush : LineBrush();
+            bar.ToolTip = Math.Round(period.Peak).ToString(CultureInfo.InvariantCulture) + "% at most, period ending " + Local(period.End, "MMM d");
+            Place(bar, x, 14 + BarHeight - height);
+            bars.Children.Add(bar);
+            TextBlock value = Label(Math.Round(period.Peak).ToString(CultureInfo.InvariantCulture) + "%", 10, WidgetWindow.Text);
+            Place(value, x - 2, BarHeight - height);
+            bars.Children.Add(value);
+            TextBlock date = Label(Local(period.End, "MMM d"), 10, WidgetWindow.Muted);
+            Place(date, x - 4, 16 + BarHeight);
+            bars.Children.Add(date);
+        }
+    }
+}
+
+// Settings for the four hand-written files. Only a field that changed is written, so hand-made text,
+// %VAR% values and folders on a missing drive survive. It never touches Claude Code's sign-in files.
+class SettingsWindow : Window
+{
+    const string HistoryName = "chat-history-folder.txt";
+    const string ReadName = "chat-read-folders.txt";
+    const string AccessName = "chat-access.txt";
+
+    readonly WidgetWindow widget;
+    readonly string dataFolder;
+    readonly Border card = new Border();
+    readonly TextBox expectedBox = new TextBox();
+    readonly TextBox historyBox = new TextBox();
+    readonly StackPanel readList = new StackPanel();
+    readonly Border laptopSwitch = new Border();
+    readonly Border laptopKnob = new Border();
+    readonly Border alertsSwitch = new Border();
+    readonly Border alertsKnob = new Border();
+    readonly Border updateSwitch = new Border();
+    readonly Border updateKnob = new Border();
+    readonly TextBox shortcutBox = new TextBox();
+    readonly TextBlock shortcutHint = new TextBlock();
+    string capturedShortcut;
+    readonly Border laptopWarning = new Border();
+    readonly TextBlock message = new TextBlock();
+    readonly SolidColorBrush warnText = new SolidColorBrush();
+    readonly SolidColorBrush switchOn = new SolidColorBrush();
+    readonly List<string> readLines = new List<string>();
+
+    string loadedExpected = "";
+    string loadedHistory = "";
+    List<string> loadedRead = new List<string>();
+    bool laptopOn;
+
+    // Tests replace the real folder dialog. Arguments are the dialog title and button; returns the folder or null.
+    internal Func<string, string, string> PickFolder;
+
+    public SettingsWindow(WidgetWindow owner, string folder)
+    {
+        widget = owner;
+        dataFolder = folder;
+
+        Title = "Claude widget settings";
+        Width = 420;
+        SizeToContent = SizeToContent.Height;
+        MaxHeight = 720;
+        WindowStyle = WindowStyle.None;
+        AllowsTransparency = true;
+        Background = Brushes.Transparent;
+        ResizeMode = ResizeMode.NoResize;
+        ShowInTaskbar = true;
+        FontFamily = new FontFamily("Segoe UI");
+        WindowStartupLocation = WindowStartupLocation.Manual;
+
+        Load();
+        Content = BuildCard();
+        ApplyAppearance();
+        WidgetWindow.AppearanceChanged += ApplyAppearance;
+        Closed += delegate { WidgetWindow.AppearanceChanged -= ApplyAppearance; };
+        PreviewKeyDown += delegate(object s, KeyEventArgs e)
+        {
+            if (e.Key != Key.Escape) return;
+            e.Handled = true;
+            if (laptopWarning.Visibility == Visibility.Visible) laptopWarning.Visibility = Visibility.Collapsed;
+            else Close();
+        };
+    }
+
+    string PathOf(string name)
+    {
+        return Path.Combine(dataFolder, name);
+    }
+
+    // Raw text, as written by hand. Nothing is expanded or dropped here.
+    void Load()
+    {
+        loadedExpected = widget.ExpectedAccount;
+        loadedHistory = ReadRaw(HistoryName).Trim();
+        loadedRead = new List<string>();
+        foreach (string line in ReadRaw(ReadName).Replace("\r\n", "\n").Split('\n'))
+        {
+            if (line.Trim().Length > 0) loadedRead.Add(line.Trim());
+        }
+        readLines.Clear();
+        readLines.AddRange(loadedRead);
+        laptopOn = ReadRaw(AccessName).Trim().Equals("laptop", StringComparison.OrdinalIgnoreCase);
+    }
+
+    string ReadRaw(string name)
+    {
+        try
+        {
+            string file = PathOf(name);
+            return File.Exists(file) ? File.ReadAllText(file) : "";
+        }
+        catch (IOException) { return ""; }
+        catch (UnauthorizedAccessException) { return ""; }
+    }
+
+    UIElement BuildCard()
+    {
+        StackPanel stack = new StackPanel();
+        stack.Children.Add(BuildHeader());
+
+        stack.Children.Add(Heading("Expected account"));
+        StyleBox(expectedBox);
+        expectedBox.Text = loadedExpected;
+        AutomationName(expectedBox, "Expected account");
+        stack.Children.Add(expectedBox);
+        stack.Children.Add(Hint("Shows a warning when a different account is signed in to Claude Code. Leave it empty for no warning.", false));
+
+        stack.Children.Add(Heading("Chat history folder"));
+        StyleBox(historyBox);
+        historyBox.Text = loadedHistory;
+        AutomationName(historyBox, "Chat history folder");
+        Border choose = TextButton("Choose", delegate
+        {
+            string picked = Pick("Choose the folder for saved chats", "Use folder");
+            if (picked != null) historyBox.Text = picked;
+        });
+        choose.Margin = new Thickness(6, 0, 0, 0);
+        Grid historyRow = new Grid();
+        historyRow.ColumnDefinitions.Add(new ColumnDefinition());
+        historyRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(choose, 1);
+        historyRow.Children.Add(historyBox);
+        historyRow.Children.Add(choose);
+        stack.Children.Add(historyRow);
+        stack.Children.Add(Hint("Each chat saves one note here. Use a folder just for these chats, because Claude can read everything in it. Leave it empty to save nothing.", true));
+
+        stack.Children.Add(Heading("Folders every chat can read"));
+        stack.Children.Add(readList);
+        Border add = TextButton("Add folder", delegate
+        {
+            string picked = Pick("Choose a folder every chat can read", "Add folder");
+            if (picked == null) return;
+            foreach (string line in readLines)
+            {
+                if (string.Equals(line.Trim('"'), picked, StringComparison.OrdinalIgnoreCase)) return;
+            }
+            readLines.Add(picked);
+            ShowReadList();
+        });
+        add.HorizontalAlignment = HorizontalAlignment.Left;
+        add.Margin = new Thickness(0, 4, 0, 0);
+        stack.Children.Add(add);
+        stack.Children.Add(Hint("Whatever Claude reads goes to Anthropic. This doesn't let Claude change these folders.", true));
+        ShowReadList();
+
+        stack.Children.Add(BuildShortcutRow());
+
+        stack.Children.Add(BuildSwitchRow(alertsSwitch, alertsKnob, "Usage alerts",
+            "Shows a Windows notification when your 7-day usage reaches 70% and 90%, and when the limit resets.",
+            delegate
+            {
+                widget.SetAlerts(!widget.alertsOn);
+                ShowMessage(widget.alertsOn ? "Usage alerts are on." : "Usage alerts are off.", false);
+                ShowSwitches();
+            }));
+        stack.Children.Add(BuildSwitchRow(updateSwitch, updateKnob, "Check for updates",
+            "Once a day, asks GitHub whether a newer version has been released, and says so on the widget. GitHub sees your IP address. Nothing about your account is sent.",
+            delegate
+            {
+                widget.SetUpdateCheck(!widget.updateCheckOn);
+                ShowMessage(widget.updateCheckOn ? "Update checks are on." : "Update checks are off.", false);
+                ShowSwitches();
+            }));
+        stack.Children.Add(BuildSwitchRow(laptopSwitch, laptopKnob, "Laptop access for chats",
+            "Lets new chats read your drives, search the web and, after you allow each one, edit files and run commands.",
+            ToggleLaptop));
+        stack.Children.Add(BuildLaptopWarning());
+
+        TextBlock keep = Hint("Open chats keep what they started with. New chats use these.", false);
+        keep.Margin = new Thickness(0, 16, 0, 0);
+        stack.Children.Add(keep);
+
+        message.FontSize = 12;
+        message.TextWrapping = TextWrapping.Wrap;
+        message.Margin = new Thickness(0, 8, 0, 0);
+        message.Visibility = Visibility.Collapsed;
+        stack.Children.Add(message);
+
+        Border save = TextButton("Save", delegate { Save(); });
+        Border close = TextButton("Close", Close);
+        close.Margin = new Thickness(0, 0, 8, 0);
+        StackPanel buttons = new StackPanel();
+        buttons.Orientation = Orientation.Horizontal;
+        buttons.HorizontalAlignment = HorizontalAlignment.Right;
+        buttons.Margin = new Thickness(0, 14, 0, 0);
+        buttons.Children.Add(close);
+        buttons.Children.Add(save);
+        stack.Children.Add(buttons);
+
+        ScrollViewer scroll = new ScrollViewer();
+        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+        scroll.Content = stack;
+
+        DropShadowEffect shadow = new DropShadowEffect();
+        shadow.BlurRadius = 12;
+        shadow.ShadowDepth = 2;
+        shadow.Direction = 270;
+        shadow.Opacity = 0.5;
+        card.Margin = new Thickness(8);
+        card.BorderBrush = WidgetWindow.CardEdge;
+        card.BorderThickness = new Thickness(1);
+        card.CornerRadius = new CornerRadius(16);
+        card.Padding = new Thickness(16, 10, 16, 14);
+        card.Effect = shadow;
+        card.Child = scroll;
+        return card;
+    }
+
+    UIElement BuildHeader()
+    {
+        Border closeButton = new Border();
+        TextBlock closeIcon = new TextBlock();
+        WidgetWindow.BuildHeaderButton(closeButton, closeIcon, "\uE711", "Close", -6);
+        AutomationName(closeButton, "Close");
+        ChatWindow.MakeButton(closeButton, Close);
+
+        Shapes.Path spark = WidgetWindow.BuildSpark(16);
+        spark.Margin = new Thickness(0, 0, 8, 0);
+        DockPanel.SetDock(spark, Dock.Left);
+
+        TextBlock title = new TextBlock();
+        title.Text = "Settings";
+        title.FontSize = 13;
+        title.FontWeight = FontWeights.SemiBold;
+        title.Foreground = WidgetWindow.Text;
+        title.VerticalAlignment = VerticalAlignment.Center;
+
+        DockPanel header = new DockPanel();
+        header.Background = Brushes.Transparent;
+        header.Margin = new Thickness(0, 0, 0, 4);
+        header.Children.Add(closeButton);
+        header.Children.Add(spark);
+        header.Children.Add(title);
+        header.MouseLeftButtonDown += delegate { DragMove(); };
+        return header;
+    }
+
+    UIElement BuildShortcutRow()
+    {
+        StackPanel panel = new StackPanel();
+        panel.Children.Add(Heading("New chat shortcut"));
+        StyleBox(shortcutBox);
+        shortcutBox.IsReadOnly = true;
+        shortcutBox.IsReadOnlyCaretVisible = false;
+        AutomationName(shortcutBox, "New chat shortcut");
+        shortcutBox.Text = widget.shortcutSetting == "off" ? "" : ShortcutText.Display(widget.shortcutSetting);
+        shortcutBox.PreviewKeyDown += delegate(object s, KeyEventArgs e)
+        {
+            Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+            // Tab and Esc keep their usual jobs, and a lone modifier waits for the key.
+            if (key == Key.Tab || key == Key.Escape) return;
+            e.Handled = true;
+            if (key == Key.LeftCtrl || key == Key.RightCtrl || key == Key.LeftAlt || key == Key.RightAlt || key == Key.LeftShift || key == Key.RightShift || key == Key.LWin || key == Key.RWin) return;
+            Capture(Keyboard.Modifiers, key);
+        };
+
+        Border use = TextButton("Set", delegate { ApplyShortcut(capturedShortcut); });
+        Border off = TextButton("Turn off", delegate { ApplyShortcut("off"); });
+        use.Margin = new Thickness(6, 0, 0, 0);
+        off.Margin = new Thickness(6, 0, 0, 0);
+        Grid row = new Grid();
+        row.ColumnDefinitions.Add(new ColumnDefinition());
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(use, 1);
+        Grid.SetColumn(off, 2);
+        row.Children.Add(shortcutBox);
+        row.Children.Add(use);
+        row.Children.Add(off);
+        panel.Children.Add(row);
+
+        shortcutHint.FontSize = 11;
+        shortcutHint.TextWrapping = TextWrapping.Wrap;
+        shortcutHint.Margin = new Thickness(0, 4, 0, 0);
+        ShowShortcutHint(null, false);
+        panel.Children.Add(shortcutHint);
+        return panel;
+    }
+
+    // A key pressed in the box. Windows key presses never reach here as a modifier, so Win is never part of it.
+    internal void Capture(ModifierKeys pressed, Key key)
+    {
+        uint modifiers = ((pressed & ModifierKeys.Control) != 0 ? ShortcutText.Ctrl : 0)
+            | ((pressed & ModifierKeys.Alt) != 0 ? ShortcutText.Alt : 0)
+            | ((pressed & ModifierKeys.Shift) != 0 ? ShortcutText.Shift : 0);
+        string text = ShortcutText.Format(modifiers, key);
+        if ((pressed & ModifierKeys.Windows) != 0 || !ShortcutText.IsAllowed(modifiers, key))
+        {
+            capturedShortcut = null;
+            shortcutBox.Text = ShortcutText.Display(text);
+            ShowShortcutHint("Use two of Ctrl, Alt and Shift, including Ctrl or Alt, plus a letter, number or function key. The Windows key can't be used.", true);
+            return;
+        }
+        capturedShortcut = text;
+        shortcutBox.Text = ShortcutText.Display(text);
+        ShowShortcutHint("Click Set to use " + ShortcutText.Display(text) + ".", false);
+    }
+
+    void ApplyShortcut(string text)
+    {
+        if (text == null)
+        {
+            ShowShortcutHint("Click the box and press the keys you want first.", true);
+            return;
+        }
+        string problem = widget.SetShortcut(text);
+        if (problem != null)
+        {
+            ShowShortcutHint(problem, true);
+            return;
+        }
+        capturedShortcut = null;
+        shortcutBox.Text = text == "off" ? "" : ShortcutText.Display(text);
+        ShowShortcutHint(text == "off" ? "The chat shortcut is off." : "Press " + ShortcutText.Display(text) + " anywhere to open a new chat.", false);
+    }
+
+    void ShowShortcutHint(string text, bool problem)
+    {
+        if (text == null)
+        {
+            text = widget.shortcutSetting == "off"
+                ? "Off. Click the box and press keys to choose one, such as " + ShortcutText.Suggested + "."
+                : "Press " + ShortcutText.Display(widget.shortcutSetting) + " anywhere to open a new chat.";
+        }
+        shortcutHint.Text = text;
+        shortcutHint.Foreground = problem ? (Brush)warnText : WidgetWindow.Muted;
+    }
+
+    UIElement BuildSwitchRow(Border track, Border knob, string title, string hint, Action toggle)
+    {
+        knob.Width = 14;
+        knob.Height = 14;
+        knob.CornerRadius = new CornerRadius(7);
+        knob.Background = WidgetWindow.Text;
+        knob.Margin = new Thickness(2, 0, 2, 0);
+        knob.VerticalAlignment = VerticalAlignment.Center;
+        track.Width = 36;
+        track.Height = 20;
+        track.CornerRadius = new CornerRadius(10);
+        track.Cursor = Cursors.Hand;
+        track.Child = knob;
+        track.VerticalAlignment = VerticalAlignment.Center;
+        track.ToolTip = title;
+        AutomationName(track, title);
+        ChatWindow.MakeButton(track, toggle);
+        DockPanel.SetDock(track, Dock.Right);
+
+        StackPanel text = new StackPanel();
+        TextBlock name = Heading(title);
+        name.Margin = new Thickness(0);
+        text.Children.Add(name);
+        text.Children.Add(Hint(hint, false));
+
+        DockPanel row = new DockPanel();
+        row.Margin = new Thickness(0, 16, 0, 0);
+        row.Children.Add(track);
+        row.Children.Add(text);
+        ShowSwitches();
+        return row;
+    }
+
+    UIElement BuildLaptopWarning()
+    {
+        StackPanel stack = new StackPanel();
+        TextBlock title = new TextBlock();
+        title.Text = "New chat windows will be able to:";
+        title.FontSize = 12;
+        title.FontWeight = FontWeights.SemiBold;
+        title.Foreground = WidgetWindow.Text;
+        stack.Children.Add(title);
+        foreach (string line in new[]
+        {
+            "Read files on your fixed drives, without asking. What Claude reads goes to Anthropic.",
+            "Create and edit files in its output folder, without asking. The first time, it makes a Claude folder on your desktop.",
+            "Search the web, without asking. Search words leave your computer. It asks before opening any site you didn't link.",
+            "Edit or create files and run commands, including deleting, only after you click Allow on a card showing what it wants to do.",
+        })
+        {
+            TextBlock item = Hint("\u2022 " + line, false);
+            item.Margin = new Thickness(0, 4, 0, 0);
+            stack.Children.Add(item);
+        }
+        TextBlock caution = Hint("Read a card before you allow it, because a command can do anything your Windows account can do.", true);
+        caution.Margin = new Thickness(0, 6, 0, 0);
+        stack.Children.Add(caution);
+
+        Border turnOn = TextButton("Turn on", delegate { SetLaptop(true); });
+        Border cancel = TextButton("Cancel", delegate { laptopWarning.Visibility = Visibility.Collapsed; });
+        cancel.Margin = new Thickness(0, 0, 8, 0);
+        StackPanel buttons = new StackPanel();
+        buttons.Orientation = Orientation.Horizontal;
+        buttons.HorizontalAlignment = HorizontalAlignment.Right;
+        buttons.Margin = new Thickness(0, 10, 0, 0);
+        buttons.Children.Add(cancel);
+        buttons.Children.Add(turnOn);
+        stack.Children.Add(buttons);
+
+        laptopWarning.Child = stack;
+        laptopWarning.CornerRadius = new CornerRadius(10);
+        laptopWarning.Padding = new Thickness(12, 10, 12, 10);
+        laptopWarning.Margin = new Thickness(0, 8, 0, 0);
+        laptopWarning.Background = WidgetWindow.OverlaySoft;
+        laptopWarning.BorderBrush = warnText;
+        laptopWarning.BorderThickness = new Thickness(1);
+        laptopWarning.Visibility = Visibility.Collapsed;
+        return laptopWarning;
+    }
+
+    // Turning on needs the warning confirmed. Turning off takes effect at once, without Save.
+    void ToggleLaptop()
+    {
+        if (laptopOn) SetLaptop(false);
+        else laptopWarning.Visibility = Visibility.Visible;
+    }
+
+    void SetLaptop(bool on)
+    {
+        try
+        {
+            string file = PathOf(AccessName);
+            if (on) WidgetFiles.WriteAtomic(file, "laptop");
+            else if (File.Exists(file)) File.Delete(file);
+            laptopOn = on;
+            laptopWarning.Visibility = Visibility.Collapsed;
+            ShowMessage(on ? "Laptop access is on for new chats." : "Laptop access is off for new chats.", false);
+        }
+        catch (Exception e)
+        {
+            if (!(e is IOException || e is UnauthorizedAccessException)) throw;
+            ShowMessage("Couldn't change laptop access: " + e.Message, true);
+        }
+        ShowSwitches();
+    }
+
+    void ShowSwitches()
+    {
+        ShowSwitch(laptopSwitch, laptopKnob, laptopOn);
+        ShowSwitch(alertsSwitch, alertsKnob, widget.alertsOn);
+        ShowSwitch(updateSwitch, updateKnob, widget.updateCheckOn);
+    }
+
+    void ShowSwitch(Border track, Border knob, bool on)
+    {
+        track.Background = on ? (Brush)switchOn : WidgetWindow.OverlayMid;
+        knob.HorizontalAlignment = on ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+    }
+
+    void ShowReadList()
+    {
+        readList.Children.Clear();
+        if (readLines.Count == 0)
+        {
+            readList.Children.Add(Hint("None yet.", false));
+            return;
+        }
+        foreach (string line in readLines)
+        {
+            string entry = line;
+            Border remove = new Border();
+            TextBlock removeIcon = new TextBlock();
+            WidgetWindow.BuildHeaderButton(remove, removeIcon, "\uE711", "Remove", 0);
+            remove.Margin = new Thickness(4, 0, -4, 0);
+            AutomationName(remove, "Remove " + entry);
+            ChatWindow.MakeButton(remove, delegate
+            {
+                readLines.Remove(entry);
+                ShowReadList();
+            });
+
+            TextBlock path = new TextBlock();
+            path.Text = entry;
+            path.FontSize = 12;
+            path.Foreground = WidgetWindow.Text;
+            path.TextTrimming = TextTrimming.CharacterEllipsis;
+            path.VerticalAlignment = VerticalAlignment.Center;
+            path.ToolTip = entry;
+
+            DockPanel row = new DockPanel();
+            row.Margin = new Thickness(0, 2, 0, 0);
+            row.Children.Add(remove);
+            if (!FolderExists(entry))
+            {
+                TextBlock missing = new TextBlock();
+                missing.Text = "not found";
+                missing.FontSize = 11;
+                missing.Foreground = warnText;
+                missing.Margin = new Thickness(6, 0, 0, 0);
+                missing.VerticalAlignment = VerticalAlignment.Center;
+                DockPanel.SetDock(missing, Dock.Right);
+                row.Children.Add(missing);
+            }
+            row.Children.Add(path);
+            readList.Children.Add(row);
+        }
+    }
+
+    static bool FolderExists(string line)
+    {
+        string folder = SettingPaths.FullFolder(line);
+        return folder != null && Directory.Exists(folder);
+    }
+
+    string Pick(string title, string button)
+    {
+        if (PickFolder != null) return PickFolder(title, button);
+        return FolderPicker.Choose(new System.Windows.Interop.WindowInteropHelper(this).Handle, title, button);
+    }
+
+    // A history path must be a full path after %VAR% values expand, by the same rule the chat uses. It is saved as typed.
+    internal static string HistoryProblem(string text)
+    {
+        if (text.Trim().Length == 0) return null;
+        return SettingPaths.FullFolder(text) == null ? "The chat history folder must be a full path, such as C:\\Notes\\Chats." : null;
+    }
+
+    static bool SameLines(List<string> a, List<string> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (a[i] != b[i]) return false;
+        }
+        return true;
+    }
+
+    // Writes only what changed. A bad history path stops the whole save before anything is written.
+    internal void Save()
+    {
+        string expected = expectedBox.Text.Trim();
+        string history = historyBox.Text.Trim();
+        bool expectedChanged = expected != loadedExpected;
+        bool historyChanged = history != loadedHistory;
+        bool readChanged = !SameLines(readLines, loadedRead);
+
+        string problem = historyChanged ? HistoryProblem(history) : null;
+        if (problem != null)
+        {
+            ShowMessage(problem + " Nothing was saved.", true);
+            return;
+        }
+        if (!expectedChanged && !historyChanged && !readChanged)
+        {
+            ShowMessage("Nothing to save.", false);
+            return;
+        }
+
+        List<string> failed = new List<string>();
+        if (expectedChanged)
+        {
+            if (Try(delegate { widget.SetExpectedAccount(expected); })) loadedExpected = expected;
+            else failed.Add("expected-account.txt");
+        }
+        if (historyChanged)
+        {
+            if (Try(delegate { WriteOrDelete(HistoryName, history); })) loadedHistory = history;
+            else failed.Add(HistoryName);
+        }
+        if (readChanged)
+        {
+            if (Try(delegate { WriteOrDelete(ReadName, readLines.Count == 0 ? "" : string.Join("\r\n", readLines) + "\r\n"); })) loadedRead = new List<string>(readLines);
+            else failed.Add(ReadName);
+        }
+        if (failed.Count > 0) ShowMessage("Couldn't save " + string.Join(", ", failed) + ". Check that the file isn't read-only or open elsewhere. Anything else was saved.", true);
+        else ShowMessage("Saved.", false);
+    }
+
+    void WriteOrDelete(string name, string text)
+    {
+        string file = PathOf(name);
+        if (text.Length == 0)
+        {
+            if (File.Exists(file)) File.Delete(file);
+        }
+        else
+        {
+            WidgetFiles.WriteAtomic(file, text);
+        }
+    }
+
+    static bool Try(Action action)
+    {
+        try
+        {
+            action();
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    void ShowMessage(string text, bool problem)
+    {
+        message.Text = text;
+        message.Foreground = problem ? (Brush)warnText : WidgetWindow.Muted;
+        message.Visibility = Visibility.Visible;
+    }
+
+    void ApplyAppearance()
+    {
+        bool light = WidgetWindow.IsLight;
+        card.Background = WidgetWindow.CardFill(light);
+        warnText.Color = WidgetWindow.Hex(light ? "#8F5700" : "#E5B454");
+        switchOn.Color = WidgetWindow.AccentColor ?? WidgetWindow.Hex("#6FBF8B");
+        ShowSwitches();
+    }
+
+    static TextBlock Heading(string text)
+    {
+        TextBlock block = new TextBlock();
+        block.Text = text;
+        block.FontSize = 12;
+        block.FontWeight = FontWeights.SemiBold;
+        block.Foreground = WidgetWindow.Text;
+        block.Margin = new Thickness(0, 14, 0, 5);
+        return block;
+    }
+
+    TextBlock Hint(string text, bool warning)
+    {
+        TextBlock block = new TextBlock();
+        block.Text = text;
+        block.FontSize = 11;
+        block.TextWrapping = TextWrapping.Wrap;
+        block.Foreground = warning ? (Brush)warnText : WidgetWindow.Muted;
+        block.Margin = new Thickness(0, 4, 0, 0);
+        return block;
+    }
+
+    static void StyleBox(TextBox box)
+    {
+        box.FontSize = 12;
+        box.Foreground = WidgetWindow.Text;
+        box.CaretBrush = WidgetWindow.Text;
+        box.Background = WidgetWindow.OverlaySoft;
+        box.BorderBrush = WidgetWindow.CardEdge;
+        box.BorderThickness = new Thickness(1);
+        box.Padding = new Thickness(5, 3, 5, 4);
+        box.VerticalContentAlignment = VerticalAlignment.Center;
+    }
+
+    static Border TextButton(string text, Action action)
+    {
+        TextBlock label = new TextBlock();
+        label.Text = text;
+        label.FontSize = 12;
+        label.Foreground = WidgetWindow.Text;
+        label.HorizontalAlignment = HorizontalAlignment.Center;
+        Border button = new Border();
+        button.Child = label;
+        button.MinWidth = 64;
+        button.Padding = new Thickness(12, 4, 12, 5);
+        button.CornerRadius = new CornerRadius(7);
+        button.Background = WidgetWindow.OverlaySoft;
+        button.Cursor = Cursors.Hand;
+        button.MouseEnter += delegate { button.Background = WidgetWindow.OverlayMid; };
+        button.MouseLeave += delegate { button.Background = WidgetWindow.OverlaySoft; };
+        AutomationName(button, text);
+        ChatWindow.MakeButton(button, action);
+        return button;
+    }
+
+    static void AutomationName(DependencyObject element, string name)
+    {
+        System.Windows.Automation.AutomationProperties.SetName(element, name);
+    }
+}
+
 static class FolderPicker
 {
     const uint PickFolders = 0x20;
@@ -2768,7 +5303,7 @@ static class FolderPicker
     }
 
     // Returns the chosen folder, or null if the user cancelled.
-    internal static string Choose(IntPtr owner)
+    internal static string Choose(IntPtr owner, string title = "Choose a folder Claude can read in this chat", string button = "Add folder")
     {
         IFileDialog dialog = (IFileDialog)new FileOpenDialog();
         try
@@ -2776,8 +5311,8 @@ static class FolderPicker
             uint options;
             dialog.GetOptions(out options);
             dialog.SetOptions(options | PickFolders | FileSystemOnly);
-            dialog.SetTitle("Choose a folder Claude can read in this chat");
-            dialog.SetOkButtonLabel("Add folder");
+            dialog.SetTitle(title);
+            dialog.SetOkButtonLabel(button);
             if (dialog.Show(owner) != 0) return null;
 
             IShellItem item;
@@ -3211,9 +5746,8 @@ class ChatWindow : Window
         {
             string setting = Path.Combine(dataFolder, "chat-history-folder.txt");
             if (!File.Exists(setting)) return null;
-            string folder = Environment.ExpandEnvironmentVariables(File.ReadAllText(setting).Trim().Trim('"'));
-            if (folder.Length == 0 || !Path.IsPathRooted(folder)) return null;
-            folder = Path.GetFullPath(folder);
+            string folder = SettingPaths.FullFolder(File.ReadAllText(setting));
+            if (folder == null) return null;
             Directory.CreateDirectory(folder);
             return folder;
         }
@@ -3234,8 +5768,8 @@ class ChatWindow : Window
             if (!File.Exists(setting)) return folders;
             foreach (string line in File.ReadAllLines(setting))
             {
-                string folder = Environment.ExpandEnvironmentVariables(line.Trim().Trim('"'));
-                if (folder.Length > 0 && Path.IsPathRooted(folder) && Directory.Exists(folder)) folders.Add(Path.GetFullPath(folder));
+                string folder = SettingPaths.FullFolder(line);
+                if (folder != null && Directory.Exists(folder)) folders.Add(folder);
             }
         }
         catch (Exception e)
