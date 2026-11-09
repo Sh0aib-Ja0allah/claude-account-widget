@@ -44,7 +44,7 @@ static class H18
         app.DispatcherUnhandledException += (sender, args2) => { Log("UNHANDLED " + args2.Exception); fails++; args2.Handled = true; };
         app.Startup += async delegate
         {
-            try { await Window(); await Older(); }
+            try { await Window(); await Older(); await ButtonFocus(); }
             catch (Exception e) { Log("HARNESS ERROR " + e); fails++; }
             Log("passes=" + passes + " fails=" + fails);
             Process.GetCurrentProcess().Kill();
@@ -362,4 +362,30 @@ static class H18
     }
 
     static void Set(object o, string f, object v) { o.GetType().GetField(f, Any).SetValue(o, v); }
+
+    // H18-27: pressing Enter on the button through the last batch leaves focus inside the chat, on the message box.
+    static async Task ButtonFocus()
+    {
+        string data = Path.Combine(root, "window-data");
+        string hist = Path.Combine(data, "hist");
+        List<ChatTurn> written;
+        ChatWindow w = OpenIn(data, WriteChat(hist, "focus", 120, out written));
+        await Idle();
+        System.Windows.Controls.Border button = (System.Windows.Controls.Border)Get(w, "olderButton");
+        System.Windows.Controls.TextBox input = (System.Windows.Controls.TextBox)Get(w, "input");
+        bool kept = true;
+        for (int i = 0; i < 20 && (int)Get(w, "renderedFrom") > 0; i++)
+        {
+            System.Windows.Input.FocusManager.SetFocusedElement(w, button);
+            button.Focus();
+            kept &= System.Windows.Input.FocusManager.GetFocusedElement(w) == button;
+            button.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice, System.Windows.PresentationSource.FromVisual(w), 0, System.Windows.Input.Key.Enter) { RoutedEvent = System.Windows.Input.Keyboard.KeyDownEvent });
+            w.UpdateLayout();
+            await Idle();
+        }
+        System.Windows.IInputElement focused = System.Windows.Input.FocusManager.GetFocusedElement(w);
+        Check("H18-27 Enter on Load earlier messages through the last batch leaves focus in the chat, on the message box", (int)Get(w, "renderedFrom") == 0
+            && !((System.Windows.Controls.StackPanel)Get(w, "messages")).Children.Contains(button) && focused == input && kept, focused == null ? "no focus" : focused.GetType().Name);
+        w.Close();
+    }
 }

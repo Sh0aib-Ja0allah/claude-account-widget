@@ -7789,7 +7789,13 @@ class ChatWindow : Window
         }
         bool shown = messages.Children.Contains(olderButton);
         if (renderedFrom > 0 && !shown) messages.Children.Insert(0, olderButton);
-        if (renderedFrom == 0 && shown) messages.Children.Remove(olderButton);
+        if (renderedFrom == 0 && shown)
+        {
+            // Removing the button while it has focus would drop focus to the window, so it goes to the message box.
+            bool focused = olderButton.IsKeyboardFocusWithin || FocusManager.GetFocusedElement(this) == olderButton;
+            messages.Children.Remove(olderButton);
+            if (focused) input.Focus();
+        }
     }
 
     // Draws one saved turn at the end of the conversation.
