@@ -1,5 +1,7 @@
 # Claude Account Widget
 
+[![Tests](https://github.com/Sh0aib-Ja0allah/claude-account-widget/actions/workflows/tests.yml/badge.svg)](https://github.com/Sh0aib-Ja0allah/claude-account-widget/actions/workflows/tests.yml)
+
 A small Windows desktop widget that shows which account Claude Code is signed in to and how much of your plan's usage limit you've used.
 
 ![The full widget and small icon in dark and light themes, plus the right-click menu with Usage history, Settings and its ring color options, showing a sample account at 52% of the 7-day limit with a forecast that it lasts until reset](docs/widget.png)
@@ -250,6 +252,8 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode all  # ever
 ```
 
 The file preview tests need Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. The status line checks need Node.js. Without these, those tests are skipped and the run says so. Results go to a scratch folder under `C:\cawt`, which is removed when everything passes. See [tests/README.md](tests/README.md) for each mode.
+
+GitHub runs the build and the quick tests on Windows for every push and pull request to `main` and `new-chat` ([.github/workflows/tests.yml](.github/workflows/tests.yml)).
 
 ## Releasing a new version
 

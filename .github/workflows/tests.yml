@@ -1,0 +1,45 @@
+# Builds the widget and runs the quick tests (the safety lint and the in-process feature suites) on a GitHub-hosted
+# Windows runner. Nothing here uses secrets or the network beyond the checkout and the log upload: the fake servers
+# bind 127.0.0.1 only, and the tests never start a real claude.
+name: Tests
+
+on:
+  push:
+    branches: [main, new-chat]
+  pull_request:
+    branches: [main, new-chat]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -OutDir "$env:RUNNER_TEMP\app"
+
+      # RUNNER_TEMP is short (C:\a\_temp or D:\a\_temp), so the scratch folder stays well under the runner's 40-character
+      # advice and 60-character limit, and it's outside the repo, as the runner requires.
+      - name: Quick tests
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode quick -Scratch "$env:RUNNER_TEMP\cawt"
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-logs
+          path: ${{ runner.temp }}\cawt\out
+          retention-days: 7
+          if-no-files-found: ignore
