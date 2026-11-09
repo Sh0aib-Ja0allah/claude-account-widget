@@ -6589,12 +6589,15 @@ class ChatWindow : Window
     readonly string settingsFolder;
     string instructions;
     bool instructionsTooLong;
+    // Set when the instructions came from a reopened note's record rather than the file, which changes the chat's line.
+    bool instructionsFromNote;
 
     readonly TextBlock instructionsHint = new TextBlock();
 
     void TakeInstructions()
     {
         instructions = ChatInstructions.Read(settingsFolder, out instructionsTooLong);
+        instructionsFromNote = false;
         if (noteWriter != null) noteWriter.Instructions = instructions;
         ShowInstructionsHint();
     }
@@ -6602,6 +6605,7 @@ class ChatWindow : Window
     void ShowInstructionsHint()
     {
         instructionsHint.Text = instructions != null ? "Using your saved instructions."
+            : instructionsTooLong && instructionsFromNote ? "This chat's saved instructions are too long, so they weren't used."
             : instructionsTooLong ? "Saved instructions not used (too long). See Settings." : "";
         instructionsHint.Visibility = instructionsHint.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -7683,6 +7687,7 @@ class ChatWindow : Window
         // A reopened chat continues with the instructions its note recorded; one saved without any has none. A record
         // edited by hand gets the same rules as the file: normalised, and not used over the limit. The note keeps its record.
         instructions = ChatInstructions.Usable(savedInstructions, out instructionsTooLong);
+        instructionsFromNote = true;
         noteWriter.Instructions = instructionsTooLong ? savedInstructions : instructions;
         ShowInstructionsHint();
         foreach (ChatTurn turn in turns)

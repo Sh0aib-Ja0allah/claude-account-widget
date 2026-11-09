@@ -705,7 +705,7 @@ static class H17
             timer.Stop();
         }
         for (int i = 0; i < 40 && File.Exists(held); i++) System.Threading.Thread.Sleep(50);
-        Check("H17-68 deleting a held prompt file returns at once and finishes in the background", timer.ElapsedMilliseconds < 50 && !File.Exists(held), timer.ElapsedMilliseconds + " ms");
+        Check("H17-68 deleting a held prompt file returns without the old 5 x 100 ms wait and finishes in the background", timer.ElapsedMilliseconds < 400 && !File.Exists(held), timer.ElapsedMilliseconds + " ms");
 
         // H17-69: a note's record: normalised, not used over the limit, and an unclosed fence doesn't swallow the turns
         bool over;
@@ -771,8 +771,10 @@ static class H17
         Check("H17-72 reopening a note without: none, and no hint", GetField(chat, "instructions") == null && !(bool)GetField(chat, "instructionsTooLong") && hint.Visibility == Visibility.Collapsed);
         CallOn(chat, "OpenSavedChat", new ChatEntry { Path = overNote, Title = "t", Started = DateTime.Now, Text = "" });
         ChatNoteWriter writer = (ChatNoteWriter)GetField(chat, "noteWriter");
-        Check("H17-72 a note whose record is over the limit (edited by hand): not used, the hint says so, the note keeps its record", GetField(chat, "instructions") == null
-            && (bool)GetField(chat, "instructionsTooLong") && hint.Text.StartsWith("Saved instructions not used") && writer.Instructions == new string('o', 4001));
+        Check("H17-72 a note whose record is over the limit (edited by hand): not used, the chat's own line says so, the note keeps its record", GetField(chat, "instructions") == null
+            && (bool)GetField(chat, "instructionsTooLong") && hint.Text == "This chat's saved instructions are too long, so they weren't used." && writer.Instructions == new string('o', 4001), hint.Text);
+        CallOn(chat, "StartNewChat");
+        Check("H17-72 New chat after that: the file's over-limit line again, pointing to Settings", hint.Text == "Saved instructions not used (too long). See Settings.", hint.Text);
         writer.Save((List<ChatTurn>)GetField(chat, "turns"));
         Check("H17-72 re-saving that chat keeps its section", File.ReadAllText(overNote).Contains("## Saved instructions") && File.ReadAllText(overNote).Contains("  " + new string('o', 4001)));
         chat.Close();

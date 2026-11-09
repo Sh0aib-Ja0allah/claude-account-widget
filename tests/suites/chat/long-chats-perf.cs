@@ -8,11 +8,16 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Text.RegularExpressions;
 using System.Windows.Documents;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 // Long chats: fixture checks (H18-01) and the L1 timing harness (P-01 to P-10, m1 to m10). Timings are reported, never
-// a pass or fail: the PASS lines only say each measurement ran. Windows stay off screen; the fake claude answers sends.
-//   long-chats-perf.exe <out folder> <fixtures folder> <second fixtures folder> <fake claude folder> [runs]
+// a pass or fail, unless "enforce" is given: then a median over 3 times its target fails (never in quick mode or CI).
+// Windows stay off screen (test mode); the fake claude answers sends. Created files in the notes are pointed at small
+// real files written to the scratch folder at run time, so their thumbnails load as they would for a user.
+//   long-chats-perf.exe <out folder> <fixtures folder> <second fixtures folder> <fake claude folder> [runs] [enforce]
 static class HP
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
@@ -34,7 +39,9 @@ static class HP
         Log((ok ? "PASS " : "FAIL ") + what + (info.Length > 0 ? " [" + info.Replace("\n", "\\n") + "]" : ""));
         if (ok) passes++; else fails++;
     }
-    static bool warmUp;
+    static bool warmUp, enforce;
+    static string filesFolder;
+    static readonly List<string> createdFiles = new List<string>();
     static long idleHeap, idlePrivate;
     static void Record(string metric, string size, double value)
     {
@@ -59,6 +66,7 @@ static class HP
         root = args[0];
         string fixtures = args[1], second = args[2], fakeDir = args[3];
         int runs = args.Length > 4 ? int.Parse(args[4]) : 5;
+        enforce = args.Length > 5 && args[5] == "enforce";
         data = Path.Combine(root, "data");
         hist = Path.Combine(root, "hist");
         foreach (string d in new[] { data, hist }) { if (Directory.Exists(d)) Directory.Delete(d, true); Directory.CreateDirectory(d); }
@@ -81,7 +89,7 @@ static class HP
         Application app = new Application();
         app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
         app.DispatcherUnhandledException += (s, e) => { Log("UNHANDLED " + e.Exception); fails++; e.Handled = true; };
-        widget = new WidgetWindow(data, account, null, null, 300, 0);
+        widget = new WidgetWindow(data, account, null, null, 300, 0, true);
         widget.ShowActivated = false;
         widget.WindowStartupLocation = WindowStartupLocation.Manual;
         widget.Left = -6000;
@@ -96,6 +104,54 @@ static class HP
         };
         widget.Show();
         app.Run();
+    }
+
+    // Six images and six text files, made here so nothing binary is committed.
+    static void WriteFiles()
+    {
+        filesFolder = Path.Combine(root, "files");
+        Directory.CreateDirectory(filesFolder);
+        for (int i = 0; i < 6; i++)
+        {
+            string image = Path.Combine(filesFolder, "picture-" + i + ".png");
+            DrawingVisual visual = new DrawingVisual();
+            using (DrawingContext dc = visual.RenderOpen())
+            {
+                dc.DrawRectangle(new SolidColorBrush(Color.FromRgb((byte)(40 * i), 120, 200)), null, new Rect(0, 0, 800, 500));
+                dc.DrawEllipse(Brushes.White, null, new Point(400, 250), 120 + 20 * i, 90);
+            }
+            RenderTargetBitmap bmp = new RenderTargetBitmap(800, 500, 96, 96, PixelFormats.Pbgra32);
+            bmp.Render(visual);
+            PngBitmapEncoder png = new PngBitmapEncoder();
+            png.Frames.Add(BitmapFrame.Create(bmp));
+            using (FileStream f = File.Create(image)) png.Save(f);
+            string text = Path.Combine(filesFolder, "notes-" + i + ".txt");
+            File.WriteAllText(text, "Notes " + i + "\nfirst line\nsecond line\nthird line\n", new UTF8Encoding(false));
+            createdFiles.Add(image);
+            createdFiles.Add(text);
+        }
+    }
+
+    // Each created file in the note points at one of those files, in turn.
+    static string PointAtFiles(string note)
+    {
+        int next = 0;
+        return Regex.Replace(note, "^- `[a-z]+-report\\.docx`$", delegate(Match m)
+        {
+            return "- `" + createdFiles[next++ % createdFiles.Count].Replace('\\', '/') + "`";
+        }, RegexOptions.Multiline);
+    }
+
+    // Image cards show a picture and text cards their opening lines once their thumbnails load.
+    static int LoadedThumbnails(DependencyObject node)
+    {
+        int count = 0;
+        Border b = node as Border;
+        if (b != null && b.Background is ImageBrush) count++;
+        TextBlock t = node as TextBlock;
+        if (t != null && t.FontSize == 10.5 && t.FontFamily != null && t.FontFamily.Source == "Consolas") count++;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++) count += LoadedThumbnails(VisualTreeHelper.GetChild(node, i));
+        return count;
     }
 
     static ChatWindow NewChat()
@@ -118,6 +174,7 @@ static class HP
         idlePrivate = self.PrivateMemorySize64;
         string month = Path.Combine(hist, "2026-01");
         Directory.CreateDirectory(month);
+        WriteFiles();
         foreach (string size in new[] { "L100", "L300", "L600" })
         {
             string note = Path.Combine(month, "2026-01-15 0930 - " + size.ToLowerInvariant() + ".md");
@@ -125,7 +182,7 @@ static class HP
             // One unrecorded warm-up run per size, so JIT compilation and first-use caches don't count.
             for (int run = -1; run < runs; run++)
             {
-                File.Copy(Path.Combine(fixtures, size + ".md"), note, true);
+                File.WriteAllText(note, PointAtFiles(File.ReadAllText(Path.Combine(fixtures, size + ".md"))), new UTF8Encoding(false));
                 await MeasureOnce(size, note, run);
             }
         }
@@ -168,6 +225,7 @@ static class HP
 
         chat = NewChat();
         // m4: opening, which builds every turn on the UI thread (includes m2 and m3 work); m5: the first layout and render pass
+        Stopwatch fromOpen = Stopwatch.StartNew();
         sw = Stopwatch.StartNew();
         Call(chat, "OpenSavedChat", new ChatEntry { Path = note, Title = size, Started = DateTime.Now, Text = "" });
         sw.Stop();
@@ -179,6 +237,11 @@ static class HP
         Record("m5-first-layout", size, sw.Elapsed.TotalMilliseconds);
         Record("m4+m5-open-total", size, build + sw.Elapsed.TotalMilliseconds);
         StackPanel messages = (StackPanel)Get(chat, "messages");
+        int cards = ((List<ChatTurn>)Get(chat, "turns")).Sum(t => t.CreatedFiles.Count);
+        for (int i = 0; i < 400 && LoadedThumbnails(messages) < cards; i++) await Task.Delay(25);
+        fromOpen.Stop();
+        Record("mf-thumbnails-ready", size, fromOpen.Elapsed.TotalMilliseconds);
+        if (run == 0) Check("P-0f " + size + ": every created file's thumbnail loads (" + cards + " cards)", LoadedThumbnails(messages) >= cards, LoadedThumbnails(messages) + " of " + cards);
         if (run == 0) Check("P-04 " + size + ": every turn is built when opening (the 0.2.1 behaviour)", ((List<ChatTurn>)Get(chat, "turns")).Count == turns.Count, messages.Children.Count + " elements");
         Record("elements", size, messages.Children.Count);
 
@@ -239,6 +302,29 @@ static class HP
         await Task.Delay(50);
     }
 
+    // The targets set for L300 on 2026-11-09. Reported always; with "enforce", a median over 3 times its target fails.
+    static void Targets()
+    {
+        var targets = new[]
+        {
+            new { Id = "T-1", Metric = "m4+m5-open-total", Target = 500.0 },
+            new { Id = "T-4", Metric = "m7-theme", Target = 400.0 },
+            new { Id = "T-5", Metric = "m8-resize", Target = 150.0 },
+            new { Id = "T-6", Metric = "m9-send", Target = 100.0 },
+            new { Id = "T-7", Metric = "m6-heap-mb", Target = 58.4 / 2 },
+        };
+        table.Append("\n| Target | L300 median | Target | Fails above (3x) | Met |\n|---|---|---|---|---|\n");
+        foreach (var t in targets)
+        {
+            List<double> v;
+            if (!results.TryGetValue(t.Metric + " L300", out v)) continue;
+            double median = Median(v);
+            table.Append("| " + t.Id + " " + t.Metric + " | " + median.ToString("F1") + " | " + t.Target.ToString("F1") + " | " + (3 * t.Target).ToString("F1") + " | " + (median <= t.Target ? "yes" : "no") + " |\n");
+            Log("TARGET " + t.Id + " " + t.Metric + " L300 median " + median.ToString("F1") + " target " + t.Target.ToString("F1") + (median <= t.Target ? " met" : " not met"));
+            if (enforce) Check("P " + t.Id + " " + t.Metric + ": L300 median within 3x the target", median <= 3 * t.Target, median.ToString("F1") + " vs " + (3 * t.Target).ToString("F1"));
+        }
+    }
+
     static double Median(List<double> v) { List<double> s = v.OrderBy(x => x).ToList(); return s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2; }
 
     static void Summarise()
@@ -256,6 +342,7 @@ static class HP
             table.Append(" |\n");
             Check("P " + metric + ": measured", true);
         }
+        Targets();
         Log(table.ToString());
     }
 }
