@@ -173,7 +173,8 @@ function Run-Chat {
     $perf = Join-Path $bin 'long-chats-perf.exe'
     $problem = Invoke-Csc $perf 'HP' ($src + (Join-Path $tests 'suites\chat\long-chats-perf.cs'))
     if ($problem) { Add-Result 'long-chats-perf' 0 1 '' 0 "build failed: $problem"; return }
-    Invoke-Suite 'long-chats-perf' $perf @((Join-Path $out 'long-chats-perf\run'), $longChats, $longChatsAgain, $fake)
+    # "enforce": a median over 3 times its target fails. Quick mode (and so CI) never times anything.
+    Invoke-Suite 'long-chats-perf' $perf @((Join-Path $out 'long-chats-perf\run'), $longChats, $longChatsAgain, $fake, '5', 'enforce')
     $report = Join-Path $out 'long-chats-perf\run\results.md'
     if (Test-Path $report) { Write-Host "Long-chat timings: $report" }
 }

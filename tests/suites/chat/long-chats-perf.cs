@@ -355,6 +355,17 @@ static class HP
             Log("TARGET " + t.Id + " " + t.Metric + " L300 median " + median.ToString("F1") + " target " + t.Target.ToString("F1") + (median <= t.Target ? " met" : " not met"));
             if (enforce) Check("P " + t.Id + " " + t.Metric + ": L300 median within 3x the target", median <= 3 * t.Target, median.ToString("F1") + " vs " + (3 * t.Target).ToString("F1"));
         }
+
+        // Report only. T-2: the longest single block of UI-thread work while opening or scrolling (opening's build, its first
+        // layout, or one scroll step, which may draw an older batch). T-3: one older batch, which is the worst scroll step.
+        List<double> build, layout, step;
+        if (results.TryGetValue("m4-open-build L300", out build) && results.TryGetValue("m5-first-layout L300", out layout) && results.TryGetValue("m10-scroll-worst-step L300", out step))
+        {
+            double longest = Math.Max(Median(build), Math.Max(Median(layout), Median(step)));
+            table.Append("| T-2 longest UI block (report only) | " + longest.ToString("F1") + " | 100.0 | - | " + (longest <= 100 ? "yes" : "no") + " |\n");
+            table.Append("| T-3 one older batch (report only) | " + Median(step).ToString("F1") + " | 50.0 | - | " + (Median(step) <= 50 ? "yes" : "no") + " |\n");
+            Log("TARGET T-2 longest UI block L300 median " + longest.ToString("F1") + " (build " + Median(build).ToString("F1") + ", first layout " + Median(layout).ToString("F1") + ", scroll step " + Median(step).ToString("F1") + ")");
+        }
     }
 
     static double Median(List<double> v) { List<double> s = v.OrderBy(x => x).ToList(); return s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2; }
