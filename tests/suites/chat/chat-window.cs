@@ -101,7 +101,7 @@ static class H3
             return;
         }
         // No mode makes a real Claude request: the old "real" mode was removed when the tests moved into the repo.
-        string[] sections = { "format", "live", "regen", "edit", "search", "instructions", "start" };
+        string[] sections = { "format", "live", "regen", "edit", "search", "instructions", "start", "long" };
         foreach (string section in sections)
         {
             if (mode != "all" && mode != section) continue;
@@ -115,6 +115,7 @@ static class H3
                 if (section == "search") await Search();
                 if (section == "instructions") await Instructions();
                 if (section == "start") await StartOffThread();
+                if (section == "long") await LongChats();
             }
             catch (Exception e) { Log("FAIL section " + section + " threw: " + e); fails++; }
         }
@@ -1677,5 +1678,127 @@ static class H3
         Check("C-L11 / H18-33 closing in the gap: no child, no prompt file, no reply written to the note", closedGone && PromptFiles() == 0
             && (notePath == null || !File.Exists(notePath) || !File.ReadAllText(notePath).Contains("after close")), "children " + FakeChildren());
         FreeStarts();
+    }
+
+    // ---------- long chats with only the newest turns drawn (L5: C-L1 to C-L8) ----------
+    static string LongNote(int count)
+    {
+        List<ChatTurn> made = new List<ChatTurn>();
+        for (int i = 0; i < count; i++)
+        {
+            ChatTurn t = new ChatTurn();
+            t.FromUser = i % 2 == 0;
+            t.Text = t.FromUser ? "Long question " + i : "Long answer " + i + " with **bold**, a list:\n\n- one\n- two\n\nand `code`.";
+            made.Add(t);
+        }
+        string path = Path.Combine(hist, "long-" + count + "-" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".md");
+        new ChatNoteWriter(hist, path, new DateTime(2026, 4, 5, 6, 7, 8)).Save(made);
+        return path;
+    }
+
+    static ChatWindow OpenLong(string note)
+    {
+        ChatWindow w = NewWindow(441, 700);
+        Call(w, "OpenSavedChat", new ChatEntry { Path = note, Title = "long", Started = DateTime.Now, Text = "" });
+        w.UpdateLayout();
+        return w;
+    }
+
+    static int DrawnFrom(ChatWindow w) { return (int)Get(w, "renderedFrom"); }
+
+    static bool DrawnSuffix(ChatWindow w)
+    {
+        List<ChatTurn> t = Turns(w);
+        int from = DrawnFrom(w);
+        int last = -1;
+        for (int i = 0; i < t.Count; i++)
+        {
+            if (!t[i].FromUser) continue;
+            if (i < from) { if (t[i].First != null) return false; continue; }
+            int at = Messages(w).Children.IndexOf(t[i].First);
+            if (at <= last) return false;
+            last = at;
+        }
+        return Messages(w).Children.Cast<UIElement>().Distinct().Count() == Messages(w).Children.Count;
+    }
+
+    static async Task LongChats()
+    {
+        string note = LongNote(300);
+        ChatWindow w = OpenLong(note);
+        await Task.Delay(300);
+        int from = DrawnFrom(w);
+        Check("C-L0 a 300-turn chat opens with only the newest turns drawn", from > 0 && Turns(w).Count == 300 && DrawnSuffix(w), "from " + from);
+
+        // C-L1: edit an older turn after drawing it by scrolling up
+        Call(w, "RenderOlder");
+        w.UpdateLayout();
+        int olderFrom = DrawnFrom(w);
+        ChatTurn older = Turns(w)[olderFrom];
+        Check("C-L1 scrolling up draws an older batch", olderFrom < from && older.FromUser && older.First != null);
+        int index = olderFrom;
+        Call(w, "StartEdit", older);
+        ReplyScript("Edited answer");
+        await SendNow(w, "Edited older question");
+        Check("C-L1 editing an older drawn turn replaces it and everything after", Turns(w).Count == index + 2 && Turns(w)[index].Text == "Edited older question"
+            && Turns(w)[index + 1].Text == "Edited answer" && DrawnSuffix(w) && DrawnFrom(w) <= olderFrom, Turns(w).Count + " turns, drawn from " + DrawnFrom(w));
+        string saved = File.ReadAllText(note);
+        Check("C-L1 the note keeps the undrawn turns before it", saved.Contains("Long question 0") && saved.Contains("Edited older question") && !saved.Contains("Long question " + (index + 2)));
+
+        // C-L2: regenerate in a long chat
+        ReplyScript("Regenerated answer");
+        Press(w, Replies(w).Last().Regenerate, Key.Enter);
+        await Idle(w);
+        Check("C-L2 regenerate replaces the newest reply and keeps the drawn suffix", Turns(w).Last().Text == "Regenerated answer" && Turns(w).Count == index + 2 && DrawnSuffix(w));
+
+        // C-L3: every drawn reply has its copy button; nothing undrawn has one
+        int copyButtons = 0;
+        foreach (UIElement e in Messages(w).Children)
+        {
+            StackPanel row = e as StackPanel;
+            if (row == null) continue;
+            copyButtons += row.Children.OfType<Border>().Count(b => System.Windows.Automation.AutomationProperties.GetName(b) == "Copy reply" || (b.ToolTip as string) == "Copy reply");
+        }
+        Check("C-L3 each drawn reply has a Copy reply button", copyButtons == Turns(w).Skip(DrawnFrom(w)).Count(t => !t.FromUser), copyButtons + " buttons");
+
+        // C-L4, C-L5: a theme change redraws, and a resize resizes, only the drawn replies. (Older batches may have been
+        // drawn by now, because the view was near the top; that's expected, so the checks count what's drawn.)
+        int drawnReplies = Turns(w).Skip(DrawnFrom(w)).Count(t => !t.FromUser);
+        Check("C-L4 only drawn replies are kept for redrawing", ReplyTexts(w).Count == drawnReplies, ReplyTexts(w).Count + " vs " + drawnReplies);
+        Theme("light"); w.UpdateLayout(); Theme("dark"); w.UpdateLayout();
+        Check("C-L4 a theme change keeps the same drawn turns", ReplyTexts(w).Count == drawnReplies && DrawnSuffix(w));
+        int drawnUser = Turns(w).Skip(DrawnFrom(w)).Count(t => t.FromUser);
+        Check("C-L5 only drawn bubbles are resized", Bubbles(w).Count == drawnReplies + drawnUser, Bubbles(w).Count + " bubbles");
+        w.Width = 700;
+        w.UpdateLayout();
+        await Task.Delay(250);
+        double width = (double)typeof(ChatWindow).GetMethod("BubbleWidth", Any).Invoke(w, null);
+        Check("C-L5 after the size settles, drawn bubbles take the new width", Bubbles(w).All(b => Math.Abs(b.MaxWidth - width) < 0.5), width.ToString("F0"));
+
+        // C-L7: a failed reply puts a long chat back as it was, drawn suffix and all
+        int countBefore = Turns(w).Count, fromBefore = DrawnFrom(w), elementsBefore = Messages(w).Children.Count;
+        FailScript();
+        await SendNow(w, "this one fails");
+        Check("C-L7 a failure in a long chat keeps the drawn turns as they were", Turns(w).Count >= countBefore && DrawnFrom(w) <= fromBefore && DrawnSuffix(w), Status(w));
+        Call(w, "StartEdit", Turns(w)[fromBefore]);
+        FailScript();
+        await SendNow(w, "edit that fails");
+        Check("C-L7 a failed edit restores the long chat", Turns(w)[fromBefore].Text != "edit that fails" && Turns(w).Count >= countBefore && DrawnFrom(w) <= fromBefore && DrawnSuffix(w), Status(w) + " drawn from " + DrawnFrom(w));
+        w.Close();
+
+        // C-L6: opening a chat from the sidebar's list draws it windowed too
+        ChatWindow o = NewWindow(441, 700);
+        await Task.Delay(300);
+        Call(o, "OpenSavedChat", new ChatEntry { Path = note, Title = "from search", Started = DateTime.Now, Text = "Long question" });
+        o.UpdateLayout();
+        Check("C-L6 opening from the list or a search result draws only the newest turns", DrawnFrom(o) > 0 && DrawnSuffix(o));
+        // C-L8: closing with an older batch pending
+        ((ScrollViewer)Get(o, "scroller")).ScrollToVerticalOffset(0);
+        o.UpdateLayout();
+        bool pendingBatch = (bool)Get(o, "olderPending");
+        int frozen = DrawnFrom(o);
+        o.Close();
+        await Task.Delay(300);
+        Check("C-L8 closing with a batch pending draws nothing more and nothing fails", pendingBatch && DrawnFrom(o) == frozen);
     }
 }
