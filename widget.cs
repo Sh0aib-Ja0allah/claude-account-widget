@@ -27,7 +27,7 @@ using Microsoft.Win32;
 static class Program
 {
     // The one version number. A release is tagged "v" plus this, so raise it before tagging.
-    internal const string AppVersion = "0.2.1";
+    internal const string AppVersion = "0.3.0";
 
     [STAThread]
     static void Main(string[] args)
