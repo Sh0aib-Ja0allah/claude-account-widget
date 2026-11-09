@@ -19,7 +19,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode chat -KeepS
 
 | Mode | What it runs | Needs |
 |---|---|---|
-| `quick` (default) | The safety lint, then the feature checks in `suites/features` that run in one process: settings window, usage alerts, limit forecast, history recording and chart, chat shortcut, update notice, account profile and tiers, sidebar account | .NET Framework 4.8, which Windows 10 and 11 include |
+| `quick` (default) | The safety lint, then the feature checks in `suites/features` that run in one process: settings window, usage alerts, limit forecast, history recording and chart, chat shortcut, update notice, account profile and tiers, sidebar account, saved instructions | .NET Framework 4.8, which Windows 10 and 11 include |
 | `chat` | `chat-window`: formatted replies, live replies, regenerate, edit, search, and a crash check. Each part runs in its own process with its own history folder | The same |
 | `widget` | The widget suite (`suites/widget`, every section), including runs of the built app in test mode. Also `process-tree` and `kill-tree` (stopping a chat's processes) and `shared-pieces` (the status line and shared files) | The same. `shared-pieces` needs Node.js and is skipped without it |
 | `preview` | `file-preview`, the file preview. The sample files are generated when it runs | Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. Skipped without them |

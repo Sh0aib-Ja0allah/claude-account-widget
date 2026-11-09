@@ -222,6 +222,78 @@ static class WidgetFiles
     }
 }
 
+// Standing instructions the user saves in Settings for new chats, kept verbatim in chat-instructions.txt in the data folder.
+// Reading normalises them; text over the limit isn't used at all, and the caller says so.
+static class ChatInstructions
+{
+    public const string FileName = "chat-instructions.txt";
+    public const int Limit = 4000;
+    // Claude Code treats a line holding exactly this specially, so it never reaches the system prompt.
+    const string BoundaryLine = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
+
+    // Line breaks become \n, control characters other than \n and \t go, the boundary line goes, and the ends are trimmed.
+    public static string Normalize(string text)
+    {
+        if (text == null) return "";
+        string unified = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        StringBuilder kept = new StringBuilder(unified.Length);
+        foreach (char c in unified)
+        {
+            if (c == '\n' || c == '\t' || !char.IsControl(c)) kept.Append(c);
+        }
+        List<string> lines = new List<string>();
+        foreach (string line in kept.ToString().Split('\n'))
+        {
+            if (line.Trim() != BoundaryLine) lines.Add(line);
+        }
+        return string.Join("\n", lines.ToArray()).Trim();
+    }
+
+    // The instructions to use, or null when there are none, the file can't be read, or they're over the limit (tooLong).
+    public static string Read(string dataFolder, out bool tooLong)
+    {
+        tooLong = false;
+        string text;
+        try
+        {
+            string path = Path.Combine(dataFolder, FileName);
+            if (!File.Exists(path)) return null;
+            text = Normalize(File.ReadAllText(path, Encoding.UTF8));
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+        catch (ArgumentException) { return null; }
+        if (text.Length == 0) return null;
+        if (text.Length > Limit)
+        {
+            tooLong = true;
+            return null;
+        }
+        return text;
+    }
+
+    public static string Read(string dataFolder)
+    {
+        bool tooLong;
+        return Read(dataFolder, out tooLong);
+    }
+
+    // Saves the text as typed, and says whether it will be used. Empty text removes the file. Text over the limit is
+    // still saved, so nothing the user wrote is lost, but it isn't used, and false comes back.
+    public static bool Save(string dataFolder, string text)
+    {
+        string path = Path.Combine(dataFolder, FileName);
+        string normal = Normalize(text);
+        if (normal.Length == 0)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return true;
+        }
+        WidgetFiles.WriteAtomic(path, text);
+        return normal.Length <= Limit;
+    }
+}
+
 // Test mode's stand-in for a real notice: one line per notice in a log file, closed at once.
 static class TestNotices
 {
