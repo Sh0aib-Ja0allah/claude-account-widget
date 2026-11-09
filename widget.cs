@@ -6553,6 +6553,8 @@ class ChatWindow : Window
     bool historyHidden;
     int historyRefresh;
     readonly ScrollViewer scroller = new ScrollViewer();
+    // Bubble widths follow the window once its size settles, not at every step of a drag.
+    readonly DispatcherTimer bubbleWidthTimer = new DispatcherTimer();
     readonly StackPanel messages = new StackPanel();
     readonly StackPanel emptyState = new StackPanel();
     readonly Border statusRow = new Border();
@@ -7811,7 +7813,18 @@ class ChatWindow : Window
             scroller.ScrollToVerticalOffset(scroller.VerticalOffset - e.Delta / 3.0);
             e.Handled = true;
         };
-        scroller.SizeChanged += delegate { UpdateBubbleWidths(); };
+        // Each width change reflows every bubble, so it waits until the size has stopped changing for 100 ms (L2c).
+        bubbleWidthTimer.Interval = TimeSpan.FromMilliseconds(100);
+        bubbleWidthTimer.Tick += delegate
+        {
+            bubbleWidthTimer.Stop();
+            UpdateBubbleWidths();
+        };
+        scroller.SizeChanged += delegate
+        {
+            bubbleWidthTimer.Stop();
+            bubbleWidthTimer.Start();
+        };
 
         Grid area = new Grid();
         area.Children.Add(scroller);
@@ -10410,6 +10423,7 @@ class ChatWindow : Window
         workingTimer.Stop();
         liveTimer.Stop();
         searchTimer.Stop();
+        bubbleWidthTimer.Stop();
         WidgetWindow.AppearanceChanged -= ApplyAppearance;
         ClosePreviewPanel();
         Open.Remove(this);

@@ -260,12 +260,20 @@ static class HP
         sw.Stop();
         Record("m7-theme", size, sw.Elapsed.TotalMilliseconds);
 
-        // m8: a 200 px resize
+        // m8: a settled 200 px resize: the layout right after the change, plus the layout when the bubble widths follow
+        // (debounced by 100 ms since l2-wins), not counting the idle wait between them
         sw = Stopwatch.StartNew();
         chat.Width = chat.Width + 200;
         Flush(chat);
         sw.Stop();
-        Record("m8-resize", size, sw.Elapsed.TotalMilliseconds);
+        double immediate = sw.Elapsed.TotalMilliseconds;
+        // What the timer would do once the size settles, timed here instead of in the background.
+        ((System.Windows.Threading.DispatcherTimer)Get(chat, "bubbleWidthTimer")).Stop();
+        sw = Stopwatch.StartNew();
+        Call(chat, "UpdateBubbleWidths");
+        Flush(chat);
+        sw.Stop();
+        Record("m8-resize", size, immediate + sw.Elapsed.TotalMilliseconds);
 
         // m10: scrolling from the bottom to the top in 20 steps
         ScrollViewer scroller = (ScrollViewer)Get(chat, "scroller");
