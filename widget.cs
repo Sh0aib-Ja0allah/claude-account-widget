@@ -258,18 +258,20 @@ static class ChatInstructions
         {
             string path = Path.Combine(dataFolder, FileName);
             if (!File.Exists(path)) return null;
-            text = Normalize(File.ReadAllText(path, Encoding.UTF8));
+            text = File.ReadAllText(path, Encoding.UTF8);
         }
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
         catch (ArgumentException) { return null; }
-        if (text.Length == 0) return null;
-        if (text.Length > Limit)
-        {
-            tooLong = true;
-            return null;
-        }
-        return text;
+        return Usable(text, out tooLong);
+    }
+
+    // Text as it will be sent, or null when it's empty or over the limit (tooLong). Used for the file and for a note's record.
+    public static string Usable(string text, out bool tooLong)
+    {
+        string normal = Normalize(text);
+        tooLong = normal.Length > Limit;
+        return normal.Length == 0 || tooLong ? null : normal;
     }
 
     public static string Read(string dataFolder)
@@ -4059,20 +4061,30 @@ class ChatClient
         return path;
     }
 
-    static void DeletePromptFile(string path)
+    // Ask calls this on the UI thread, so only the first attempt happens here. The process may hold the file for a
+    // moment after it ends; later attempts run in the background, and the sweep removes anything still left after a day.
+    internal static void DeletePromptFile(string path)
     {
-        // The process may hold the file for a moment after it ends.
-        for (int attempt = 0; attempt < 5; attempt++)
+        if (TryDelete(path)) return;
+        Task.Run(delegate
         {
-            try
+            for (int attempt = 0; attempt < 20; attempt++)
             {
-                if (File.Exists(path)) File.Delete(path);
-                return;
+                Thread.Sleep(100);
+                if (TryDelete(path)) return;
             }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            Thread.Sleep(100);
+        });
+    }
+
+    static bool TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return true;
         }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     // The prompt file's path uses forward slashes, like the other paths, so a backslash never escapes the closing quote.
@@ -4904,7 +4916,8 @@ class ChatNoteWriter
                     string text = string.Join("\n", kept.ToArray()).Trim();
                     return text.Length > 0 ? text : null;
                 }
-                kept.Add(lines[inside].StartsWith("  ") ? lines[inside].Substring(2) : lines[inside].TrimStart(' '));
+                if (!lines[inside].StartsWith("  ") && lines[inside].Trim().Length > 0) return null;
+                kept.Add(lines[inside].Length >= 2 ? lines[inside].Substring(2) : "");
             }
             return null;
         }
@@ -4913,11 +4926,17 @@ class ChatNoteWriter
 
     static void AppendInstructions(StringBuilder note, string text)
     {
+        int longest = 3;
+        foreach (Match run in Regex.Matches(text, "`+"))
+        {
+            longest = Math.Max(longest, run.Length);
+        }
+        string fence = new string('`', longest + 1);
         note.Append("## Saved instructions\n\n");
         note.Append("The user's saved instructions for new chats, as this chat started with them.\n\n");
-        note.Append("````text\n");
+        note.Append(fence).Append("text\n");
         foreach (string line in text.Replace("\r\n", "\n").Split('\n')) note.Append("  ").Append(line).Append('\n');
-        note.Append("````\n\n");
+        note.Append(fence).Append("\n\n");
     }
 
     // Each message sits in a code block with a longer fence than any backtick run it contains,
@@ -6040,13 +6059,15 @@ class SettingsWindow : Window
             if (Try(delegate { WriteOrDelete(ReadName, readLines.Count == 0 ? "" : string.Join("\r\n", readLines) + "\r\n"); })) loadedRead = new List<string>(readLines);
             else failed.Add(ReadName);
         }
+        bool instructionsUsable = true;
         if (instructionsChanged)
         {
             // Text over the limit is still saved, but it isn't used; the notice under the box stays.
-            if (Try(delegate { ChatInstructions.Save(dataFolder, instructionsText); })) loadedInstructions = instructionsText;
+            if (Try(delegate { instructionsUsable = ChatInstructions.Save(dataFolder, instructionsText); })) loadedInstructions = instructionsText;
             else failed.Add(ChatInstructions.FileName);
         }
         if (failed.Count > 0) ShowMessage("Couldn't save " + string.Join(", ", failed) + ". Check that the file isn't read-only or open elsewhere. Anything else was saved.", true);
+        else if (!instructionsUsable) ShowMessage("Saved, but the saved instructions are too long to use.", true);
         else ShowMessage("Saved.", false);
     }
 
@@ -7659,10 +7680,10 @@ class ChatWindow : Window
         turns.AddRange(saved);
         noteWriter = new ChatNoteWriter(historyFolder, entry.Path, started);
         noteWriter.Title = customTitle;
-        // A reopened chat continues with the instructions its note recorded; one saved without any has none.
-        instructions = savedInstructions;
-        instructionsTooLong = false;
-        noteWriter.Instructions = instructions;
+        // A reopened chat continues with the instructions its note recorded; one saved without any has none. A record
+        // edited by hand gets the same rules as the file: normalised, and not used over the limit. The note keeps its record.
+        instructions = ChatInstructions.Usable(savedInstructions, out instructionsTooLong);
+        noteWriter.Instructions = instructionsTooLong ? savedInstructions : instructions;
         ShowInstructionsHint();
         foreach (ChatTurn turn in turns)
         {
