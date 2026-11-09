@@ -695,17 +695,29 @@ static class H17
         Static("DeletePromptFile", fresh);
         File.Delete(lockedOld);
 
-        // H17-68: a locked prompt file doesn't block the caller; it goes once it's free (Worker A's LOW a)
-        string held = (string)Static("WritePromptFile", plain);
-        Stopwatch timer;
-        using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.None))
+        // H17-68: a held prompt file doesn't block the caller (Worker A's LOW a). The fastest of three calls must be under
+        // 90 ms, so any inline 100 ms retry fails every run while one slow run under load doesn't; the file must still be
+        // there when the call returns, and gone within about 2.5 s of release, which only the background retry can do.
+        double fastest = double.MaxValue;
+        bool stillThere = true, goneAfter = true;
+        for (int round = 0; round < 3; round++)
         {
-            timer = Stopwatch.StartNew();
-            Static("DeletePromptFile", held);
-            timer.Stop();
+            string held = (string)Static("WritePromptFile", plain);
+            Stopwatch timer;
+            using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                timer = Stopwatch.StartNew();
+                Static("DeletePromptFile", held);
+                timer.Stop();
+                stillThere &= File.Exists(held);
+            }
+            fastest = Math.Min(fastest, timer.Elapsed.TotalMilliseconds);
+            Stopwatch released = Stopwatch.StartNew();
+            while (File.Exists(held) && released.ElapsedMilliseconds < 2500) System.Threading.Thread.Sleep(20);
+            goneAfter &= !File.Exists(held);
         }
-        for (int i = 0; i < 40 && File.Exists(held); i++) System.Threading.Thread.Sleep(50);
-        Check("H17-68 deleting a held prompt file returns without the old 5 x 100 ms wait and finishes in the background", timer.ElapsedMilliseconds < 400 && !File.Exists(held), timer.ElapsedMilliseconds + " ms");
+        Check("H17-68 a held prompt file: the call returns at once (fastest of 3 under 90 ms), leaving the file", fastest < 90 && stillThere, fastest.ToString("F1") + " ms");
+        Check("H17-68 and the background retry deletes it within 2.5 s of release", goneAfter);
 
         // H17-69: a note's record: normalised, not used over the limit, and an unclosed fence doesn't swallow the turns
         bool over;

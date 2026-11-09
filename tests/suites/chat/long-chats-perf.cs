@@ -284,7 +284,25 @@ static class HP
         Record("m10-scroll-worst-step", size, worst);
         Record("m10-scroll-total", size, total);
 
-        // m9: sending in a long chat, from the click until the user's bubble is laid out (L600 is over the request limit)
+        // m9: sending in a long chat, from the click until the user's bubble is laid out (L600 is over the request limit).
+        // P-11 (m11): the same with claude's start held for 2 s, which must not hold up the window.
+        if (size == "L300")
+        {
+            ((TextBox)Get(chat, "input")).Text = "A question while claude is slow to start.";
+            int shownBefore = messages.Children.Count;
+            ChatClient.StartGateForTests = delegate { System.Threading.Thread.Sleep(2000); };
+            try
+            {
+                sw = Stopwatch.StartNew();
+                Call(chat, "Send");
+                Flush(chat);
+                sw.Stop();
+                Record("m11-send-slow-start", size, sw.Elapsed.TotalMilliseconds);
+                if (run == 0) Check("P-11 " + size + ": the user's bubble appears while claude is still starting", messages.Children.Count > shownBefore);
+                for (int i = 0; i < 1200 && (bool)Get(chat, "busy"); i++) await Task.Delay(25);
+            }
+            finally { ChatClient.StartGateForTests = null; }
+        }
         if (size != "L600")
         {
             ((TextBox)Get(chat, "input")).Text = "One more question.";
@@ -311,6 +329,7 @@ static class HP
             new { Id = "T-4", Metric = "m7-theme", Target = 400.0 },
             new { Id = "T-5", Metric = "m8-resize", Target = 150.0 },
             new { Id = "T-6", Metric = "m9-send", Target = 100.0 },
+            new { Id = "T-6 (P-11)", Metric = "m11-send-slow-start", Target = 100.0 },
             new { Id = "T-7", Metric = "m6-heap-mb", Target = 58.4 / 2 },
         };
         table.Append("\n| Target | L300 median | Target | Fails above (3x) | Met |\n|---|---|---|---|---|\n");

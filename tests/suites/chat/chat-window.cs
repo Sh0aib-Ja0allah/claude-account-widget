@@ -101,7 +101,7 @@ static class H3
             return;
         }
         // No mode makes a real Claude request: the old "real" mode was removed when the tests moved into the repo.
-        string[] sections = { "format", "live", "regen", "edit", "search", "instructions" };
+        string[] sections = { "format", "live", "regen", "edit", "search", "instructions", "start" };
         foreach (string section in sections)
         {
             if (mode != "all" && mode != section) continue;
@@ -114,6 +114,7 @@ static class H3
                 if (section == "edit") await Edit();
                 if (section == "search") await Search();
                 if (section == "instructions") await Instructions();
+                if (section == "start") await StartOffThread();
             }
             catch (Exception e) { Log("FAIL section " + section + " threw: " + e); fails++; }
         }
@@ -1496,5 +1497,185 @@ static class H3
         await Exchange(none, "without a file", "eight");
         Check("H17-20 no file: the rules only", !LastPrompt().Contains(Preamble()) && !(bool)Get(none, "instructionsTooLong"));
         none.Close();
+    }
+
+    // ---------- starting claude off the UI thread (L8: H18-30 to 38, C-L9 to C-L11) ----------
+    static System.Threading.ManualResetEventSlim gateEntered, gateRelease;
+    static int gateCount;
+    static bool startOnUiThread;
+
+    static void HoldStarts()
+    {
+        gateEntered = new System.Threading.ManualResetEventSlim(false);
+        gateRelease = new System.Threading.ManualResetEventSlim(false);
+        gateCount = 0;
+        startOnUiThread = false;
+        ChatClient.StartGateForTests = delegate
+        {
+            System.Threading.Interlocked.Increment(ref gateCount);
+            if (Application.Current.Dispatcher.CheckAccess()) startOnUiThread = true;
+            gateEntered.Set();
+            gateRelease.Wait(15000);
+        };
+    }
+    static void FreeStarts() { ChatClient.StartGateForTests = null; ChatClient.StartFaultForTests = null; }
+    static async Task<bool> WaitForGate() { for (int i = 0; i < 400 && !gateEntered.IsSet; i++) await Task.Delay(25); return gateEntered.IsSet; }
+    static int FakeChildren() { return System.Diagnostics.Process.GetProcessesByName("fake").Length; }
+    static async Task<bool> ChildrenBackTo(int count) { for (int i = 0; i < 120 && FakeChildren() > count; i++) await Task.Delay(25); return FakeChildren() <= count; }
+    static string PromptFolderNow() { return (string)typeof(ChatClient).GetMethod("PromptFolder", Any).Invoke(null, null); }
+    static int PromptFiles() { string f = PromptFolderNow(); return Directory.Exists(f) ? Directory.GetFiles(f, "*.txt").Length : 0; }
+
+    static async Task StartOffThread()
+    {
+        try { await StartChecks(); }
+        finally { FreeStarts(); }
+    }
+
+    static async Task StartChecks()
+    {
+        int children = FakeChildren();
+
+        // H18-30, 31: the start runs on a thread-pool thread, and the window keeps working while it waits
+        HoldStarts();
+        Script(Sys, Result("after the gate"));
+        ChatClient client = new ChatClient();
+        Task<ChatResult> asked = client.Ask(InstructionsRequest(null), delegate(string a, string b) { return Task.FromResult(false); });
+        bool entered = await WaitForGate();
+        bool ran = false;
+        Application.Current.Dispatcher.BeginInvoke(new Action(delegate { ran = true; }));
+        await Task.Delay(150);
+        Check("H18-31 while the start is held, work queued on the UI thread still runs", entered && ran && !asked.IsCompleted);
+        gateRelease.Set();
+        ChatResult result = await asked;
+        Check("H18-30 claude is found and started off the UI thread, and the reply arrives", entered && !startOnUiThread && result.Outcome == ChatOutcome.Reply && result.Text == "after the gate");
+
+        // H18-32: Stop while the start is held: Stopped, nothing written to the child, which is gone, and no prompt file
+        HoldStarts();
+        Script(Sys, Result("must not arrive"));
+        int stdinBefore = FakeStdin().Count;
+        client = new ChatClient();
+        asked = client.Ask(InstructionsRequest("Held instructions"), delegate(string a, string b) { return Task.FromResult(false); });
+        await WaitForGate();
+        client.Stop();
+        gateRelease.Set();
+        result = await asked;
+        bool gone = await ChildrenBackTo(children);
+        await Task.Delay(300);
+        Check("H18-32 Stop in the gap: Stopped, no stdin written, the child is gone, no prompt file", result.Outcome == ChatOutcome.Stopped && FakeStdin().Count == stdinBefore && gone && PromptFiles() == 0,
+            result.Outcome + ", stdin " + (FakeStdin().Count - stdinBefore) + ", children " + FakeChildren() + ", files " + PromptFiles());
+
+        // H18-38: Stop twice in the gap, and Stop after the child exited
+        HoldStarts();
+        Script(Sys, Result("x"));
+        client = new ChatClient();
+        asked = client.Ask(InstructionsRequest(null), delegate(string a, string b) { return Task.FromResult(false); });
+        await WaitForGate();
+        bool threw = false;
+        try { client.Stop(); client.Stop(); } catch (Exception) { threw = true; }
+        gateRelease.Set();
+        result = await asked;
+        try { client.Stop(); } catch (Exception) { threw = true; }
+        Check("H18-38 Stop twice in the gap, then again after the end: one Stopped outcome, no exception", !threw && result.Outcome == ChatOutcome.Stopped && await ChildrenBackTo(children));
+        FreeStarts();
+
+        // H18-34: no claude on PATH: NotFound, no child, no prompt file
+        string savedPath = Environment.GetEnvironmentVariable("PATH");
+        Environment.SetEnvironmentVariable("PATH", Path.Combine(root, "no-claude-here"));
+        try
+        {
+            result = await new ChatClient().Ask(InstructionsRequest("x"), delegate(string a, string b) { return Task.FromResult(false); });
+            Check("H18-34 no claude: NotFound, no child and no prompt file", result.Outcome == ChatOutcome.NotFound && FakeChildren() <= children && PromptFiles() == 0);
+            ChatWindow nf = NewWindow();
+            await Task.Delay(200);
+            await SendNow(nf, "is anyone there");
+            Check("H18-34 the window says what 1768b9e said", Status(nf) == "Claude Code wasn't found. Install it, then try again.", Status(nf));
+            nf.Close();
+        }
+        finally { Environment.SetEnvironmentVariable("PATH", savedPath); }
+
+        // H18-35: each failed start maps as before, and the prompt file written before it is deleted
+        foreach (Exception fault in new Exception[] { new System.ComponentModel.Win32Exception(2), new IOException("busy"), new UnauthorizedAccessException("no") })
+        {
+            Exception thisFault = fault;
+            ChatClient.StartFaultForTests = delegate(System.Diagnostics.ProcessStartInfo info) { return thisFault; };
+            result = await new ChatClient().Ask(InstructionsRequest("x"), delegate(string a, string b) { return Task.FromResult(false); });
+            ChatOutcome expected = fault is System.ComponentModel.Win32Exception ? ChatOutcome.NotFound : ChatOutcome.Failed;
+            Check("H18-35 " + fault.GetType().Name + " at start: " + expected + ", no prompt file", result.Outcome == expected && PromptFiles() == 0, result.Outcome.ToString());
+        }
+
+        // H18-37: the process is started with exactly the arguments BuildStart gives
+        System.Diagnostics.ProcessStartInfo captured = null;
+        ChatClient.StartFaultForTests = delegate(System.Diagnostics.ProcessStartInfo info) { captured = info; return new IOException("stop here"); };
+        foreach (string kind in new[] { "plain", "instructions", "folder", "laptop", "recall" })
+        {
+            ChatRequest r = InstructionsRequest(kind == "instructions" ? "Some instructions" : null);
+            if (kind == "folder") r.Folders.Add(Path.Combine(root, "attached"));
+            if (kind == "laptop") { r.Laptop = true; r.DefaultOutputFolder = Path.Combine(root, "out"); r.CurrentOutputFolder = delegate { return null; }; }
+            if (kind == "recall") r.MemoryFolder = hist;
+            captured = null;
+            await new ChatClient().Ask(r, delegate(string a, string b) { return Task.FromResult(false); });
+            string file = captured == null ? "" : System.Text.RegularExpressions.Regex.Match(captured.Arguments, "--append-system-prompt-file \"([^\"]+)\"").Groups[1].Value;
+            System.Diagnostics.ProcessStartInfo direct = (System.Diagnostics.ProcessStartInfo)typeof(ChatClient).GetMethod("BuildStart", Any).Invoke(null, new object[] { (string)typeof(ChatClient).GetMethod("FindClaude", Any).Invoke(null, null), r, file });
+            Check("H18-37 " + kind + ": started with BuildStart's program and arguments, unchanged", captured != null && captured.FileName == direct.FileName && captured.Arguments == direct.Arguments && captured.WorkingDirectory == direct.WorkingDirectory);
+        }
+        FreeStarts();
+
+        // C-L9, H18-36: the window during the gap, then Stop by the button
+        ChatWindow w = NewWindow();
+        await Task.Delay(200);
+        await Exchange(w, "first question", "first answer");
+        HoldStarts();
+        Script(Sys, Result("too late"));
+        int turnsBefore = Turns(w).Count;
+        Input(w).Text = "second question";
+        Call(w, "Send");
+        await WaitForGate();
+        Input(w).Text = "a third, sent during the gap";
+        Call(w, "Send");
+        await Task.Delay(100);
+        Border send = (Border)Get(w, "sendButton");
+        Check("H18-36 during the gap: busy, the button is Stop, a second Send starts nothing, regenerate is hidden", Busy(w) && (string)send.ToolTip == "Stop" && gateCount == 1
+            && Replies(w).All(t => t.Regenerate == null || t.Regenerate.Visibility != Visibility.Visible), "starts " + gateCount);
+        Call(w, "StopRequest");
+        gateRelease.Set();
+        await Idle(w);
+        bool cl9Gone = await ChildrenBackTo(children);
+        Check("C-L9 Stop in the gap from the window: stopped as at 1768b9e, no child, no prompt file, no reply", !Busy(w) && Status(w).StartsWith("Stopped.") && cl9Gone && PromptFiles() == 0
+            && !Turns(w).Any(t => t.Text == "too late"), Status(w));
+
+        // C-L10: Escape in the gap
+        HoldStarts();
+        Script(Sys, Result("too late again"));
+        Input(w).Text = "escape question";
+        Call(w, "Send");
+        await WaitForGate();
+        Esc(w);
+        gateRelease.Set();
+        await Idle(w);
+        Check("C-L10 Escape in the gap stops it the same way", !Busy(w) && Status(w).StartsWith("Stopped.") && await ChildrenBackTo(children) && PromptFiles() == 0 && !Turns(w).Any(t => t.Text == "too late again"), Status(w));
+
+        // H18-36 after a normal reply: the same state as 1768b9e
+        FreeStarts();
+        await Exchange(w, "normal question", "normal answer");
+        Check("H18-36 after a reply: one more user turn and reply, in order, regenerate on the newest only", Turns(w).Last().Text == "normal answer" && Turns(w)[Turns(w).Count - 2].Text == "normal question"
+            && Replies(w).Last().Regenerate.Visibility == Visibility.Visible && !Busy(w));
+        w.Close();
+
+        // C-L11, H18-33: closing the window in the gap
+        HoldStarts();
+        Script(Sys, Result("after close"));
+        ChatWindow c = NewWindow();
+        await Task.Delay(200);
+        Input(c).Text = "closing question";
+        Call(c, "Send");
+        await WaitForGate();
+        string notePath = NotePath(c);
+        c.Close();
+        gateRelease.Set();
+        await Task.Delay(600);
+        bool closedGone = await ChildrenBackTo(children);
+        Check("C-L11 / H18-33 closing in the gap: no child, no prompt file, no reply written to the note", closedGone && PromptFiles() == 0
+            && (notePath == null || !File.Exists(notePath) || !File.ReadAllText(notePath).Contains("after close")), "children " + FakeChildren());
+        FreeStarts();
     }
 }

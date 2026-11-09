@@ -4138,51 +4138,59 @@ class ChatClient
         return start;
     }
 
+    // Test seams, null in production: the gate runs just before the process starts, so a test can hold that moment open,
+    // and the fault lets a test make the start fail in each way without a real failure.
+    internal static Action StartGateForTests;
+    internal static Func<ProcessStartInfo, Exception> StartFaultForTests;
+
+    // Searching PATH, writing the prompt file and starting the process (cmd.exe for a .cmd) happen together on a
+    // thread-pool thread: on a busy PC they can take seconds, and the window must stay responsive meanwhile.
     public async Task<ChatResult> Ask(ChatRequest chat, Func<string, string, Task<bool>> approve)
     {
         request = chat;
-        string claude = FindClaude();
-        if (claude == null) return new ChatResult(ChatOutcome.NotFound, null);
-
-        string promptFile;
-        try
-        {
-            promptFile = WritePromptFile(chat);
-        }
-        catch (IOException) { return new ChatResult(ChatOutcome.Failed, null); }
-        catch (UnauthorizedAccessException) { return new ChatResult(ChatOutcome.Failed, null); }
-        try
-        {
-            return await RunRequest(claude, chat, approve, promptFile);
-        }
-        finally
-        {
-            DeletePromptFile(promptFile);
-        }
-    }
-
-    async Task<ChatResult> RunRequest(string claude, ChatRequest chat, Func<string, string, Task<bool>> approve, string promptFile)
-    {
+        string promptFile = null;
         Process running = new Process();
         try
         {
-            running.StartInfo = BuildStart(claude, chat, promptFile);
-            running.Start();
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            return new ChatResult(ChatOutcome.NotFound, null);
-        }
-        catch (IOException)
-        {
-            return new ChatResult(ChatOutcome.Failed, null);
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return new ChatResult(ChatOutcome.Failed, null);
-        }
+            ChatOutcome? notStarted = await Task.Run(new Func<ChatOutcome?>(delegate
+            {
+                string claude = FindClaude();
+                if (claude == null) return ChatOutcome.NotFound;
+                try
+                {
+                    promptFile = WritePromptFile(chat);
+                    running.StartInfo = BuildStart(claude, chat, promptFile);
+                    if (StartGateForTests != null) StartGateForTests();
+                    Exception fault = StartFaultForTests != null ? StartFaultForTests(running.StartInfo) : null;
+                    if (fault != null) throw fault;
+                    running.Start();
+                    return null;
+                }
+                catch (System.ComponentModel.Win32Exception) { return ChatOutcome.NotFound; }
+                catch (IOException) { return ChatOutcome.Failed; }
+                catch (UnauthorizedAccessException) { return ChatOutcome.Failed; }
+            }));
+            if (notStarted.HasValue) return new ChatResult(notStarted.Value, null);
 
-        process = running;
+            // Back on the UI thread, where Stop is called too, so no lock is needed. A Stop that came while the process was
+            // starting ends it here, before any message is written to it.
+            process = running;
+            if (stopRequested)
+            {
+                KillTree(running);
+                process = null;
+                return new ChatResult(ChatOutcome.Stopped, null);
+            }
+            return await RunRequest(running, chat, approve);
+        }
+        finally
+        {
+            if (promptFile != null) DeletePromptFile(promptFile);
+        }
+    }
+
+    async Task<ChatResult> RunRequest(Process running, ChatRequest chat, Func<string, string, Task<bool>> approve)
+    {
         lastActivity = DateTime.UtcNow;
         Task<string> errors = running.StandardError.ReadToEndAsync();
         Task<ChatResult> talking = Converse(running, chat, approve);

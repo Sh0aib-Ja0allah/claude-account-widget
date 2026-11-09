@@ -143,7 +143,7 @@ function Build-App {
 
 function Run-Quick {
     Invoke-Suite 'lint' "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $tests 'lint.ps1'), '-Root', $tests) -NoSummary
-    $quick = [ordered]@{ 'settings-window' = 'H6'; 'usage-alerts' = 'H7'; 'limit-forecast' = 'H8'; 'history-recording' = 'H9'; 'history-chart' = 'H10'; 'chat-shortcut' = 'H11'; 'update-notice' = 'H12'; 'account-profile' = 'H14'; 'account-tiers' = 'H15'; 'sidebar-account' = 'H16'; 'saved-instructions' = 'H17' }
+    $quick = [ordered]@{ 'settings-window' = 'H6'; 'usage-alerts' = 'H7'; 'limit-forecast' = 'H8'; 'history-recording' = 'H9'; 'history-chart' = 'H10'; 'chat-shortcut' = 'H11'; 'update-notice' = 'H12'; 'account-profile' = 'H14'; 'account-tiers' = 'H15'; 'sidebar-account' = 'H16'; 'saved-instructions' = 'H17'; 'long-chats' = 'H18' }
     foreach ($n in $quick.Keys) { Invoke-Feature $n $quick[$n] @((Join-Path $out "$n\run")) }
 }
 
@@ -157,7 +157,7 @@ function Run-Chat {
     $problem = Invoke-Csc $exe 'H3' ($src + (Join-Path $tests 'suites\chat\chat-window.cs'))
     if ($problem) { Add-Result 'chat' 0 1 '' 0 "build failed: $problem"; return }
     # Each mode gets its own process and its own history folder (one shared folder makes search fail).
-    foreach ($m in 'format', 'live', 'regen', 'edit', 'search', 'instructions') { Invoke-Suite "chat-$m" $exe @($m, (Join-Path $out "chat-$m\run"), $fake) }
+    foreach ($m in 'format', 'live', 'regen', 'edit', 'search', 'instructions', 'start') { Invoke-Suite "chat-$m" $exe @($m, (Join-Path $out "chat-$m\run"), $fake) }
     Invoke-Suite 'chat-crash' $exe @('crash', (Join-Path $out 'chat-crash\run'), $fake) -Survive
 
     # Long chats: the generated notes (twice, to check they're the same), a safety check of them, then the timing report.
