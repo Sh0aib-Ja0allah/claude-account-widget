@@ -9,7 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 // Worker A's independent S4 checks (usage history recording). No window needed except the widget path; no network.
-// h9.exe <out folder>
+// history-recording.exe <out folder>
 static class H9
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

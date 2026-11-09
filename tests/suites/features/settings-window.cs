@@ -11,7 +11,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 // Worker A's independent S1 checks (Settings window). Off screen only; the folder dialog is replaced; no real input.
-// h6.exe <out folder>
+// settings-window.exe <out folder>
 static class H6
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

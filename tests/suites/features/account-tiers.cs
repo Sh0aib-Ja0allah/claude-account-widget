@@ -13,7 +13,7 @@ using System.Windows.Controls;
 using Microsoft.Win32;
 // Worker A's checks of the C1 ruling (tier comparison when unverified), the early check after a token change, and
 // the test-copy guards (off-screen windows, Start with Windows). Fake Anthropic on 127.0.0.1:18779; fake files only.
-// h15.exe <out folder>
+// account-tiers.exe <out folder>
 static class H15
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

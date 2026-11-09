@@ -8,7 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 // Worker A's independent S0 checks. Off screen only; no real input, notice, shortcut or network.
-// h5.exe <out folder> <statusline.js>
+// shared-pieces.exe <out folder> <statusline.js>
 static class H5
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

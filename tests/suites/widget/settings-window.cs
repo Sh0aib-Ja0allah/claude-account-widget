@@ -106,7 +106,7 @@ static partial class H4
         Box(s, "expectedBox").Text = "someone.else@example.com";
         s.Save();
         TextBlock note = (TextBlock)Get(w, "accountNote");
-        Check("expected: saved and applied without a restart", File.ReadAllText(Path.Combine(d, "expected-account.txt")) == "someone.else@example.com" && note.Text == "Couldn't verify account", note.Text); // C3b/C1: unverified with no tiers gives the amber note (h4acct covers red and amber)
+        Check("expected: saved and applied without a restart", File.ReadAllText(Path.Combine(d, "expected-account.txt")) == "someone.else@example.com" && note.Text == "Couldn't verify account", note.Text); // C3b/C1: unverified with no tiers gives the amber note (account-profile covers red and amber)
         Box(s, "expectedBox").Text = "  ";
         s.Save();
         Check("expected: clearing removes the file and the warning", !File.Exists(Path.Combine(d, "expected-account.txt")) && note.Text == "Signed in to Claude Code", note.Text);

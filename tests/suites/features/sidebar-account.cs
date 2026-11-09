@@ -12,7 +12,7 @@ using System.Windows.Media;
 using Microsoft.Win32;
 // Worker A's independent checks of C3d (chat sidebar account row and its menu). Test mode only: windows off screen,
 // no real dialog (ConfirmExit seam), no popup (ShowAccountMenu seam), the real Run entry only read.
-// h16.exe <out folder>
+// sidebar-account.exe <out folder>
 static class H16
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

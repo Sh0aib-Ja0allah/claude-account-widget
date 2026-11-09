@@ -10,7 +10,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 // Worker A's independent S3 checks (limit forecast). Off screen only.
-// h8.exe <out folder>
+// limit-forecast.exe <out folder>
 static class H8
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

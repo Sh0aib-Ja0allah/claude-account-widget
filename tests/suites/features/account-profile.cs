@@ -12,7 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 // Worker A's independent checks of C3b (account verified through the token's profile). Own fake Anthropic on
 // 127.0.0.1:18777; fake credentials with a marker token; never the real Anthropic address.
-// h14.exe <out folder>
+// account-profile.exe <out folder>
 static class H14
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

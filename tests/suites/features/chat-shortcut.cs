@@ -10,7 +10,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 // Worker A's independent S6 checks (chat shortcut) and the S5-1 retest. Never registers a real global shortcut:
 // the registrar here only imitates Windows' rule that a key combination can be registered once, whatever the id.
-// h11.exe <out folder>
+// chat-shortcut.exe <out folder>
 static class H11
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

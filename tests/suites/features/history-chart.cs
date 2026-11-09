@@ -11,7 +11,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Shapes;
 // Worker A's independent S5 checks (usage history window), with extreme and damaged rows. Off screen only.
-// h10.exe <out folder>
+// history-chart.exe <out folder>
 static class H10
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

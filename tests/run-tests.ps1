@@ -3,10 +3,10 @@
 #
 #   run-tests.ps1 [-Mode quick|chat|widget|preview|all|png] [-Scratch <path>] [-TimeoutSeconds <n>] [-KeepScratch]
 #
-# quick    the safety lint, then the in-process feature suites (h6-h12, h14-h16)  needs: nothing but .NET Framework 4.8
-# chat     h3 format, live, regen, edit, search and crash, each in its own process
-# widget   h4 (every section), hk and h13 (real child processes), h5 (needs node)  builds the app into scratch
-# preview  h2 file preview                       needs: Python with reportlab, python-pptx, openpyxl, Pillow; LibreOffice
+# quick    the safety lint, then the in-process feature suites in suites\features  needs: nothing but .NET Framework 4.8
+# chat     chat-window: format, live, regen, edit, search and crash, each in its own process
+# widget   the widget suite (every section), process-tree and kill-tree (real child processes), shared-pieces (needs node)  builds the app into scratch
+# preview  file-preview                          needs: Python with reportlab, python-pptx, openpyxl, Pillow; LibreOffice
 # all      quick, chat, widget and preview
 # png      renders docs/widget.png from sample data into scratch (copying it to docs/ is a manual step)
 param(
@@ -38,7 +38,7 @@ if ($Scratch.Length -gt 60) { throw "The scratch folder path is too long ($($Scr
 if ($Scratch.Length -gt 40) { Write-Warning "The scratch folder path is $($Scratch.Length) characters long. Under 40 is safest for LibreOffice." }
 if ((Test-Path $Scratch) -and (Get-ChildItem $Scratch -Force | Select-Object -First 1)) { throw "The scratch folder already exists and isn't empty: $Scratch" }
 
-$snapshot = Join-Path $Scratch 'snapshot'   # h4's live section reads <scratch>\snapshot\widget.cs (two levels above its out folder)
+$snapshot = Join-Path $Scratch 'snapshot'   # the widget suite's test-copy-windows section reads <scratch>\snapshot\widget.cs (two levels above its out folder)
 $bin = Join-Path $Scratch 'bin'
 $out = Join-Path $Scratch 'out'
 $temp = Join-Path $Scratch 't'
@@ -117,11 +117,12 @@ function Invoke-Suite([string]$suite, [string]$exe, [string[]]$arguments, [switc
 $src = @((Join-Path $snapshot 'widget.cs'), (Join-Path $snapshot 'preview.cs'))
 $features = Join-Path $tests 'suites\features'
 $widgetSuite = Join-Path $tests 'suites\widget'
-$h4Files = 'h4.cs', 'h4s1.cs', 'h4s2.cs', 'h4s3.cs', 'h4fix.cs', 'h4s4.cs', 'h4s5.cs', 'h4fix2.cs', 'h4s6.cs', 'h4fix3.cs', 'h4s7.cs', 'h4fix4.cs', 'h4png.cs', 'h4fix5.cs', 'h4fix6.cs', 'h4acct.cs', 'h4live.cs', 'h4layout.cs', 'h4chatw.cs', 'h4switch.cs', 'h4note.cs', 'h4c3d.cs' | ForEach-Object { Join-Path $widgetSuite $_ }
+$widgetFiles = 'widget-main.cs', 'settings-window.cs', 'usage-alerts.cs', 'limit-forecast.cs', 'review-fixes-s2.cs', 'history-recording.cs', 'history-chart.cs', 'review-fixes-s4.cs', 'chat-shortcut.cs', 'review-fixes-s5.cs', 'update-notice.cs', 'review-fixes-s6.cs', 'screenshot.cs', 'review-fixes-s7.cs', 'strict-release-links.cs', 'account-profile.cs', 'test-copy-windows.cs', 'settings-layout.cs', 'chat-width.cs', 'settings-switches.cs', 'card-notes.cs', 'sidebar-account.cs' | ForEach-Object { Join-Path $widgetSuite $_ }
 
-function Invoke-Feature([string]$name, [string[]]$arguments) {
+# Each feature suite is its own program; $main is its entry class (the classes kept their original H-names).
+function Invoke-Feature([string]$name, [string]$main, [string[]]$arguments) {
     $exe = Join-Path $bin "$name.exe"
-    $problem = Invoke-Csc $exe $name.ToUpper() ($src + (Join-Path $features "$name.cs"))
+    $problem = Invoke-Csc $exe $main ($src + (Join-Path $features "$name.cs"))
     if ($problem) { Add-Result $name 0 1 '' 0 "build failed: $problem"; return }
     Invoke-Suite $name $exe $arguments
 }
@@ -142,7 +143,8 @@ function Build-App {
 
 function Run-Quick {
     Invoke-Suite 'lint' "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $tests 'lint.ps1'), '-Root', $tests) -NoSummary
-    foreach ($n in 'h6', 'h7', 'h8', 'h9', 'h10', 'h11', 'h12', 'h14', 'h15', 'h16') { Invoke-Feature $n @((Join-Path $out "$n\run")) }
+    $quick = [ordered]@{ 'settings-window' = 'H6'; 'usage-alerts' = 'H7'; 'limit-forecast' = 'H8'; 'history-recording' = 'H9'; 'history-chart' = 'H10'; 'chat-shortcut' = 'H11'; 'update-notice' = 'H12'; 'account-profile' = 'H14'; 'account-tiers' = 'H15'; 'sidebar-account' = 'H16' }
+    foreach ($n in $quick.Keys) { Invoke-Feature $n $quick[$n] @((Join-Path $out "$n\run")) }
 }
 
 function Run-Chat {
@@ -151,30 +153,30 @@ function Run-Chat {
     $problem = Invoke-Csc-Plain (Join-Path $fake 'fake.exe') (Join-Path $tests 'fakes\fake-claude.cs')
     if ($problem) { Add-Result 'chat' 0 1 '' 0 "fake claude build failed: $problem"; return }
     "@`"$fake\fake.exe`" %*`r`n@exit /b %ERRORLEVEL%" | Set-Content -Encoding ascii (Join-Path $fake 'claude.cmd')
-    $exe = Join-Path $bin 'h3.exe'
-    $problem = Invoke-Csc $exe 'H3' ($src + (Join-Path $tests 'suites\chat\h3.cs'))
+    $exe = Join-Path $bin 'chat-window.exe'
+    $problem = Invoke-Csc $exe 'H3' ($src + (Join-Path $tests 'suites\chat\chat-window.cs'))
     if ($problem) { Add-Result 'chat' 0 1 '' 0 "build failed: $problem"; return }
     # Each mode gets its own process and its own history folder (one shared folder makes search fail).
-    foreach ($m in 'format', 'live', 'regen', 'edit', 'search') { Invoke-Suite "h3-$m" $exe @($m, (Join-Path $out "h3-$m\run"), $fake) }
-    Invoke-Suite 'h3-crash' $exe @('crash', (Join-Path $out 'h3-crash\run'), $fake) -Survive
+    foreach ($m in 'format', 'live', 'regen', 'edit', 'search') { Invoke-Suite "chat-$m" $exe @($m, (Join-Path $out "chat-$m\run"), $fake) }
+    Invoke-Suite 'chat-crash' $exe @('crash', (Join-Path $out 'chat-crash\run'), $fake) -Survive
 }
 
 function Run-Widget {
     $app = Build-App
     $server = Join-Path $bin 'fake-server.exe'
     $problem = Invoke-Csc-Plain $server (Join-Path $tests 'fakes\fake-server.cs')
-    if ($problem) { Add-Result 'h4' 0 1 '' 0 "fake server build failed: $problem"; return }
-    $exe = Join-Path $bin 'h4.exe'
-    $problem = Invoke-Csc $exe 'H4' ($src + $h4Files)
-    if ($problem) { Add-Result 'h4' 0 1 '' 0 "build failed: $problem" } else { Invoke-Suite 'h4' $exe @('all', (Join-Path $out 'h4'), $app, $server) }
+    if ($problem) { Add-Result 'widget' 0 1 '' 0 "fake server build failed: $problem"; return }
+    $exe = Join-Path $bin 'widget-main.exe'
+    $problem = Invoke-Csc $exe 'H4' ($src + $widgetFiles)
+    if ($problem) { Add-Result 'widget' 0 1 '' 0 "build failed: $problem" } else { Invoke-Suite 'widget' $exe @('all', (Join-Path $out 'widget'), $app, $server) }
 
     $spawner = Join-Path $bin 'spawner.exe'
     $problem = Invoke-Csc-Plain $spawner (Join-Path $tests 'fakes\spawner.cs')
-    if ($problem) { Add-Result 'hk' 0 1 '' 0 "spawner build failed: $problem" } else { Invoke-Feature 'hk' @($spawner) }
-    Invoke-Feature 'h13' @()
+    if ($problem) { Add-Result 'process-tree' 0 1 '' 0 "spawner build failed: $problem" } else { Invoke-Feature 'process-tree' 'HK' @($spawner) }
+    Invoke-Feature 'kill-tree' 'H13' @()
     if (Get-Command node -ErrorAction SilentlyContinue) {
-        Invoke-Feature 'h5' @((Join-Path $out 'h5\run'), (Join-Path $snapshot 'statusline.js'))
-    } else { Add-Result 'h5' 0 0 'node not found' 0 'the status line checks need Node.js' }
+        Invoke-Feature 'shared-pieces' 'H5' @((Join-Path $out 'shared-pieces\run'), (Join-Path $snapshot 'statusline.js'))
+    } else { Add-Result 'shared-pieces' 0 0 'node not found' 0 'the status line checks need Node.js' }
 }
 
 function Find-Soffice {
@@ -186,24 +188,24 @@ function Find-Soffice {
 
 function Run-Preview {
     $py = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $py) { Add-Result 'h2' 0 0 'Python not found' 0 'the preview samples are generated with Python'; return }
-    if (-not (Find-Soffice)) { Add-Result 'h2' 0 0 'LibreOffice not found' 0 'the docx, pptx and xlsx previews need LibreOffice'; return }
+    if (-not $py) { Add-Result 'file-preview' 0 0 'Python not found' 0 'the preview samples are generated with Python'; return }
+    if (-not (Find-Soffice)) { Add-Result 'file-preview' 0 0 'LibreOffice not found' 0 'the docx, pptx and xlsx previews need LibreOffice'; return }
     $p2 = Join-Path $Scratch 'fixtures\p2'
     New-Item -ItemType Directory -Force $p2 | Out-Null
     $text = & $py.Source -I (Join-Path $tests 'fixtures\make-samples.py') $p2 2>&1
-    if ($LASTEXITCODE -ne 0) { Add-Result 'h2' 0 0 'sample generation failed' 0 ("needs reportlab, python-pptx, openpyxl and Pillow: " + (($text | Select-Object -Last 2) -join ' ')); return }
-    $exe = Join-Path $bin 'h2.exe'
-    $problem = Invoke-Csc $exe 'H2' ($src + (Join-Path $tests 'suites\preview\h2.cs'))
-    if ($problem) { Add-Result 'h2' 0 1 '' 0 "build failed: $problem"; return }
-    Invoke-Suite 'h2' $exe @('all', (Join-Path $out 'h2\run'), $p2)
+    if ($LASTEXITCODE -ne 0) { Add-Result 'file-preview' 0 0 'sample generation failed' 0 ("needs reportlab, python-pptx, openpyxl and Pillow: " + (($text | Select-Object -Last 2) -join ' ')); return }
+    $exe = Join-Path $bin 'file-preview.exe'
+    $problem = Invoke-Csc $exe 'H2' ($src + (Join-Path $tests 'suites\preview\file-preview.cs'))
+    if ($problem) { Add-Result 'file-preview' 0 1 '' 0 "build failed: $problem"; return }
+    Invoke-Suite 'file-preview' $exe @('all', (Join-Path $out 'file-preview\run'), $p2)
 }
 
 function Run-Png {
     $app = Build-App
     $server = Join-Path $bin 'fake-server.exe'
     $null = Invoke-Csc-Plain $server (Join-Path $tests 'fakes\fake-server.cs')
-    $exe = Join-Path $bin 'h4.exe'
-    $problem = Invoke-Csc $exe 'H4' ($src + $h4Files)
+    $exe = Join-Path $bin 'widget-main.exe'
+    $problem = Invoke-Csc $exe 'H4' ($src + $widgetFiles)
     if ($problem) { Add-Result 'png' 0 1 '' 0 "build failed: $problem"; return }
     Invoke-Suite 'png' $exe @('png', (Join-Path $out 'png'), $app, $server)
     $shot = Join-Path $out 'png\widget.png'

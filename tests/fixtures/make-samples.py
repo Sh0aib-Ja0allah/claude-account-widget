@@ -1,4 +1,4 @@
-# Generates the file preview test samples (h2) into a scratch folder: make-samples.py <scratch p2 folder>
+# Generates the file preview test samples (file-preview) into a scratch folder: make-samples.py <scratch p2 folder>
 # Everything is invented sample text. It also writes page-samples\sample.pdf next to that folder for the compare test.
 import os, sys
 out=sys.argv[1]

@@ -6,7 +6,7 @@ using System.Linq;
 using System.Threading;
 // Worker A's independent checks of the KillTree fix. Fake tables for the walk; real trees use only ping.exe and
 // cmd.exe children this program starts itself. Nothing else on the machine is touched.
-// h13.exe
+// kill-tree.exe
 static class H13
 {
     static int fails, passes;

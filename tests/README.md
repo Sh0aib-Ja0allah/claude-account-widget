@@ -19,10 +19,10 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode chat -KeepS
 
 | Mode | What it runs | Needs |
 |---|---|---|
-| `quick` (default) | The safety lint, then the feature checks that run in one process: h6 to h12 and h14 to h16 | .NET Framework 4.8, which Windows 10 and 11 include |
-| `chat` | h3, the chat window: formatted replies, live replies, regenerate, edit, search, and a crash check. Each part runs in its own process with its own history folder | The same |
-| `widget` | h4, the widget and its features, including runs of the built app in test mode. Also hk and h13 (stopping a chat's processes) and h5 (the status line) | The same. h5 needs Node.js and is skipped without it |
-| `preview` | h2, the file preview. The sample files are generated when it runs | Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. Skipped without them |
+| `quick` (default) | The safety lint, then the feature checks in `suites/features` that run in one process: settings window, usage alerts, limit forecast, history recording and chart, chat shortcut, update notice, account profile and tiers, sidebar account | .NET Framework 4.8, which Windows 10 and 11 include |
+| `chat` | `chat-window`: formatted replies, live replies, regenerate, edit, search, and a crash check. Each part runs in its own process with its own history folder | The same |
+| `widget` | The widget suite (`suites/widget`, every section), including runs of the built app in test mode. Also `process-tree` and `kill-tree` (stopping a chat's processes) and `shared-pieces` (the status line and shared files) | The same. `shared-pieces` needs Node.js and is skipped without it |
+| `preview` | `file-preview`, the file preview. The sample files are generated when it runs | Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. Skipped without them |
 | `all` | quick, chat, widget and preview | All of the above |
 | `png` | Renders `docs/widget.png` from sample data into the scratch folder. Copy it to `docs/` by hand if it looks right | .NET Framework 4.8 |
 
@@ -54,15 +54,55 @@ tests/
   lint.ps1          the safety lint
   references.rsp    the compiler's reference list
   fakes/            fake-claude.cs (stands in for the claude command), fake-server.cs (usage, profile and releases),
-                    spawner.cs (a process tree for hk), TestPorts.cs (the run's free ports)
+                    spawner.cs (a process tree for process-tree), TestPorts.cs (the run's free ports)
   fixtures/         make-samples.py (generates the preview samples)
-  suites/preview    h2.cs
-  suites/chat       h3.cs
-  suites/widget     h4*.cs, one test program in several files
-  suites/features   h5.cs to h16.cs and hk.cs, each its own program
+  suites/preview    file-preview.cs
+  suites/chat       chat-window.cs
+  suites/widget     widget-main.cs and its section files, one test program in several files
+  suites/features   one program per file, such as update-notice.cs
 ```
 
-The `h` numbers come from the order the tests were written, and are kept for now.
+The suites used to be called by number, after the order they were written. Their entry classes keep those names (`H2` to `H16`, `HK`), and `run-tests.ps1` passes each one with `/main:`.
+
+| Old name | New name |
+|---|---|
+| `suites/preview/h2.cs` | `suites/preview/file-preview.cs` |
+| `suites/chat/h3.cs` | `suites/chat/chat-window.cs` |
+| `suites/widget/h4.cs` | `suites/widget/widget-main.cs` |
+| `suites/widget/h4s1.cs` | `suites/widget/settings-window.cs` |
+| `suites/widget/h4s2.cs` | `suites/widget/usage-alerts.cs` |
+| `suites/widget/h4s3.cs` | `suites/widget/limit-forecast.cs` |
+| `suites/widget/h4s4.cs` | `suites/widget/history-recording.cs` |
+| `suites/widget/h4s5.cs` | `suites/widget/history-chart.cs` |
+| `suites/widget/h4s6.cs` | `suites/widget/chat-shortcut.cs` |
+| `suites/widget/h4s7.cs` | `suites/widget/update-notice.cs` |
+| `suites/widget/h4fix.cs` | `suites/widget/review-fixes-s2.cs` |
+| `suites/widget/h4fix2.cs` | `suites/widget/review-fixes-s4.cs` |
+| `suites/widget/h4fix3.cs` | `suites/widget/review-fixes-s5.cs` |
+| `suites/widget/h4fix4.cs` | `suites/widget/review-fixes-s6.cs` |
+| `suites/widget/h4fix5.cs` | `suites/widget/review-fixes-s7.cs` |
+| `suites/widget/h4fix6.cs` | `suites/widget/strict-release-links.cs` |
+| `suites/widget/h4acct.cs` | `suites/widget/account-profile.cs` |
+| `suites/widget/h4live.cs` | `suites/widget/test-copy-windows.cs` |
+| `suites/widget/h4layout.cs` | `suites/widget/settings-layout.cs` |
+| `suites/widget/h4chatw.cs` | `suites/widget/chat-width.cs` |
+| `suites/widget/h4switch.cs` | `suites/widget/settings-switches.cs` |
+| `suites/widget/h4note.cs` | `suites/widget/card-notes.cs` |
+| `suites/widget/h4c3d.cs` | `suites/widget/sidebar-account.cs` |
+| `suites/widget/h4png.cs` | `suites/widget/screenshot.cs` |
+| `suites/features/h5.cs` | `suites/features/shared-pieces.cs` |
+| `suites/features/h6.cs` | `suites/features/settings-window.cs` |
+| `suites/features/h7.cs` | `suites/features/usage-alerts.cs` |
+| `suites/features/h8.cs` | `suites/features/limit-forecast.cs` |
+| `suites/features/h9.cs` | `suites/features/history-recording.cs` |
+| `suites/features/h10.cs` | `suites/features/history-chart.cs` |
+| `suites/features/h11.cs` | `suites/features/chat-shortcut.cs` |
+| `suites/features/h12.cs` | `suites/features/update-notice.cs` |
+| `suites/features/h13.cs` | `suites/features/kill-tree.cs` |
+| `suites/features/h14.cs` | `suites/features/account-profile.cs` |
+| `suites/features/h15.cs` | `suites/features/account-tiers.cs` |
+| `suites/features/h16.cs` | `suites/features/sidebar-account.cs` |
+| `suites/features/hk.cs` | `suites/features/process-tree.cs` |
 
 ## Writing a test
 

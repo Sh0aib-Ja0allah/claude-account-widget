@@ -11,7 +11,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 // Worker A's independent S2 checks (usage alerts). Off screen only; notices are captured in memory; no real tray, no network.
-// h7.exe <out folder>
+// usage-alerts.exe <out folder>
 static class H7
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;

@@ -13,7 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 // Worker A's independent S7 checks (update notice) and the S6 fix retest. Its own local server on 127.0.0.1:18774;
 // no real GitHub request, no real browser, no real global shortcut.
-// h12.exe <out folder>
+// update-notice.exe <out folder>
 static class H12
 {
     const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
