@@ -159,6 +159,23 @@ function Run-Chat {
     # Each mode gets its own process and its own history folder (one shared folder makes search fail).
     foreach ($m in 'format', 'live', 'regen', 'edit', 'search', 'instructions') { Invoke-Suite "chat-$m" $exe @($m, (Join-Path $out "chat-$m\run"), $fake) }
     Invoke-Suite 'chat-crash' $exe @('crash', (Join-Path $out 'chat-crash\run'), $fake) -Survive
+
+    # Long chats: the generated notes (twice, to check they're the same), a safety check of them, then the timing report.
+    # Timings never fail a run; see tests/README.md.
+    $generator = Join-Path $bin 'make-long-chats.exe'
+    $problem = Invoke-Csc-Plain $generator (Join-Path $tests 'fixtures\make-long-chats.cs')
+    if ($problem) { Add-Result 'long-chats' 0 1 '' 0 "fixture generator build failed: $problem"; return }
+    $longChats = Join-Path $Scratch 'fixtures\long'
+    $longChatsAgain = Join-Path $Scratch 'fixtures\long2'
+    $null = & $generator $longChats
+    $null = & $generator $longChatsAgain
+    Invoke-Suite 'long-chat-fixtures' "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $tests 'lint.ps1'), '-Root', $longChats) -NoSummary
+    $perf = Join-Path $bin 'long-chats-perf.exe'
+    $problem = Invoke-Csc $perf 'HP' ($src + (Join-Path $tests 'suites\chat\long-chats-perf.cs'))
+    if ($problem) { Add-Result 'long-chats-perf' 0 1 '' 0 "build failed: $problem"; return }
+    Invoke-Suite 'long-chats-perf' $perf @((Join-Path $out 'long-chats-perf\run'), $longChats, $longChatsAgain, $fake)
+    $report = Join-Path $out 'long-chats-perf\run\results.md'
+    if (Test-Path $report) { Write-Host "Long-chat timings: $report" }
 }
 
 function Run-Widget {

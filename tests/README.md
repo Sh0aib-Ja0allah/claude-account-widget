@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode chat -KeepS
 | Mode | What it runs | Needs |
 |---|---|---|
 | `quick` (default) | The safety lint, then the feature checks in `suites/features` that run in one process: settings window, usage alerts, limit forecast, history recording and chart, chat shortcut, update notice, account profile and tiers, sidebar account, saved instructions | .NET Framework 4.8, which Windows 10 and 11 include |
-| `chat` | `chat-window`: formatted replies, live replies, regenerate, edit, search, the saved-instructions file, and a crash check. Each part runs in its own process with its own history folder | The same |
+| `chat` | `chat-window`: formatted replies, live replies, regenerate, edit, search, the saved-instructions file, and a crash check. Each part runs in its own process with its own history folder. Then the long-chat notes (`long-chat-fixtures` checks them with the safety lint) and `long-chats-perf`, which opens them and reports timings to `out\long-chats-perf\run\results.md` | The same |
 | `widget` | The widget suite (`suites/widget`, every section), including runs of the built app in test mode. Also `process-tree` and `kill-tree` (stopping a chat's processes) and `shared-pieces` (the status line and shared files) | The same. `shared-pieces` needs Node.js and is skipped without it |
 | `preview` | `file-preview`, the file preview. The sample files are generated when it runs | Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. Skipped without them |
 | `all` | quick, chat, widget and preview | All of the above |
@@ -55,9 +55,10 @@ tests/
   references.rsp    the compiler's reference list
   fakes/            fake-claude.cs (stands in for the claude command), fake-server.cs (usage, profile and releases),
                     spawner.cs (a process tree for process-tree), TestPorts.cs (the run's free ports)
-  fixtures/         make-samples.py (generates the preview samples)
+  fixtures/         make-samples.py (generates the preview samples), make-long-chats.cs (generates the long-chat notes:
+                    100, 300 and 600 turns, the same bytes every time)
   suites/preview    file-preview.cs
-  suites/chat       chat-window.cs
+  suites/chat       chat-window.cs, long-chats-perf.cs (timings, reported but never a pass or fail)
   suites/widget     widget-main.cs and its section files, one test program in several files
   suites/features   one program per file, such as update-notice.cs
 ```
