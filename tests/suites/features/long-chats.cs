@@ -44,7 +44,7 @@ static class H18
         app.DispatcherUnhandledException += (sender, args2) => { Log("UNHANDLED " + args2.Exception); fails++; args2.Handled = true; };
         app.Startup += async delegate
         {
-            try { await Window(); }
+            try { await Window(); await Older(); }
             catch (Exception e) { Log("HARNESS ERROR " + e); fails++; }
             Log("passes=" + passes + " fails=" + fails);
             Process.GetCurrentProcess().Kill();
@@ -257,4 +257,109 @@ static class H18
         s.Close();
         await Task.Delay(10);
     }
+
+    // ---------- H18-20 to 26: older turns load as you scroll up (L4) ----------
+    static async Task Idle()
+    {
+        await System.Windows.Threading.Dispatcher.CurrentDispatcher.InvokeAsync(delegate { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+    }
+
+    static bool DrawnInOrder(ChatWindow w)
+    {
+        List<ChatTurn> turns = (List<ChatTurn>)Get(w, "turns");
+        int from = (int)Get(w, "renderedFrom");
+        System.Windows.Controls.StackPanel messages = (System.Windows.Controls.StackPanel)Get(w, "messages");
+        int last = -1;
+        for (int i = from; i < turns.Count; i++)
+        {
+            if (!turns[i].FromUser) continue;
+            int at = messages.Children.IndexOf(turns[i].First);
+            if (at <= last) return false;
+            last = at;
+        }
+        // Each drawn element appears once
+        return messages.Children.Cast<System.Windows.UIElement>().Distinct().Count() == messages.Children.Count;
+    }
+
+    static async Task Older()
+    {
+        string data = Path.Combine(root, "window-data");
+        string hist = Path.Combine(data, "hist");
+        List<ChatTurn> written;
+        string note = WriteChat(hist, "older", 600, out written);
+        ChatWindow w = OpenIn(data, note);
+        await Idle();
+        System.Windows.Controls.ScrollViewer scroller = (System.Windows.Controls.ScrollViewer)Get(w, "scroller");
+        System.Windows.Controls.StackPanel messages = (System.Windows.Controls.StackPanel)Get(w, "messages");
+        List<ChatTurn> turns = (List<ChatTurn>)Get(w, "turns");
+        int olderBatch = (int)typeof(ChatWindow).GetField("OlderBatch", Any).GetValue(null);
+
+        // H18-24: the button
+        System.Windows.Controls.Border button = (System.Windows.Controls.Border)Get(w, "olderButton");
+        Check("H18-24 a Load earlier messages button heads the chat, reachable by Tab, named for screen readers", button != null && messages.Children[0] == button && button.Focusable
+            && System.Windows.Input.KeyboardNavigation.GetIsTabStop(button) && System.Windows.Automation.AutomationProperties.GetName(button) == "Load earlier messages");
+
+        // H18-21: drawing older turns while reading in the middle keeps what's on screen still
+        scroller.ScrollToVerticalOffset(scroller.ScrollableHeight / 2);
+        w.UpdateLayout();
+        await Idle();
+        int from = (int)Get(w, "renderedFrom");
+        ChatTurn anchorTurn = turns.Skip(from).First(t => t.FromUser && messages.Children.IndexOf(t.First) > 3);
+        System.Windows.UIElement anchor = anchorTurn.First;
+        double before = anchor.TranslatePoint(new System.Windows.Point(0, 0), scroller).Y;
+        Call(w, "RenderOlder");
+        w.UpdateLayout();
+        double after = anchor.TranslatePoint(new System.Windows.Point(0, 0), scroller).Y;
+        int newFrom = (int)Get(w, "renderedFrom");
+        Check("H18-21 the anchor moves 2 px or less when a batch is drawn above it", Math.Abs(after - before) <= 2, before.ToString("F1") + " to " + after.ToString("F1"));
+        Check("H18-20 the batch is about " + olderBatch + " turns, drawn above in order, starting with a question", from - newFrom >= olderBatch && from - newFrom <= olderBatch + 1 && turns[newFrom].FromUser && DrawnInOrder(w), (from - newFrom) + " turns");
+
+        // H18-22: two scroll events near the top before the window gets to them draw one batch, never the same turns twice
+        from = (int)Get(w, "renderedFrom");
+        scroller.ScrollToVerticalOffset(0);
+        scroller.ScrollToVerticalOffset(1);
+        w.UpdateLayout();
+        bool pending = (bool)Get(w, "olderPending");
+        await Idle();
+        Check("H18-22 near the top: one pending batch at a time, and no turn is drawn twice", pending && (int)Get(w, "renderedFrom") < from && DrawnInOrder(w));
+
+        // H18-25: with the newest reply still arriving, a batch above leaves it last and the view on it
+        System.Windows.Controls.Border live = new System.Windows.Controls.Border { Height = 40 };
+        messages.Children.Add(live);
+        Set(w, "followLatest", true);
+        scroller.ScrollToEnd();
+        w.UpdateLayout();
+        Call(w, "RenderOlder");
+        w.UpdateLayout();
+        await Idle();
+        Check("H18-25 drawing older turns during a reply keeps the reply last and the view at the end", messages.Children[messages.Children.Count - 1] == live
+            && scroller.VerticalOffset >= scroller.ScrollableHeight - 8 && (bool)Get(w, "followLatest"));
+        messages.Children.Remove(live);
+
+        // H18-23: the button, then scrolling, reach the first turn; everything is drawn once, in order, and the button goes
+        button.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice, System.Windows.PresentationSource.FromVisual(w), 0, System.Windows.Input.Key.Enter) { RoutedEvent = System.Windows.Input.Keyboard.KeyDownEvent });
+        for (int i = 0; i < 100 && (int)Get(w, "renderedFrom") > 0; i++)
+        {
+            scroller.ScrollToVerticalOffset(0);
+            w.UpdateLayout();
+            await Idle();
+        }
+        Check("H18-23 scrolling up reaches the first turn: every turn drawn once, in order, and the button is gone", (int)Get(w, "renderedFrom") == 0 && DrawnInOrder(w)
+            && turns.Where(t => t.FromUser).All(t => t.First != null) && !messages.Children.Contains(button));
+        w.Close();
+
+        // H18-26: closing with a batch pending
+        ChatWindow c = OpenIn(data, note);
+        await Idle();
+        System.Windows.Controls.ScrollViewer cs = (System.Windows.Controls.ScrollViewer)Get(c, "scroller");
+        cs.ScrollToVerticalOffset(0);
+        c.UpdateLayout();
+        bool queued = (bool)Get(c, "olderPending");
+        int fromBefore = (int)Get(c, "renderedFrom");
+        c.Close();
+        await Idle();
+        Check("H18-26 closing with a batch pending: nothing is drawn after close, and nothing fails", queued && (int)Get(c, "renderedFrom") == fromBefore);
+    }
+
+    static void Set(object o, string f, object v) { o.GetType().GetField(f, Any).SetValue(o, v); }
 }

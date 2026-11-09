@@ -6536,6 +6536,10 @@ class ChatWindow : Window
     // and chatFiles always come from turns, never from what's drawn.
     int renderedFrom;
     internal const int FirstBatch = 30;
+    internal const int OlderBatch = 20;
+    // At the top of the conversation while older turns aren't drawn yet, for the keyboard and screen readers.
+    Border olderButton;
+    bool olderPending;
     readonly Dictionary<string, List<Action>> cardRefreshers = new Dictionary<string, List<Action>>(StringComparer.OrdinalIgnoreCase);
     static string desktopFolder = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     readonly Border titleButton = new Border();
@@ -7716,6 +7720,7 @@ class ChatWindow : Window
         }
         renderedFrom = FirstToRender(turns.Count);
         for (int i = renderedFrom; i < turns.Count; i++) RenderTurn(turns[i]);
+        ShowOlderButton();
         UpdateReplyActions();
         chatTitle.Text = entry.Title;
         ShowSaveState(true);
@@ -7729,6 +7734,62 @@ class ChatWindow : Window
         int from = Math.Max(0, count - FirstBatch);
         while (from > 0 && !turns[from].FromUser) from--;
         return from;
+    }
+
+    // Draws the next OlderBatch turns above the drawn ones, keeping what's on screen where it is.
+    void RenderOlder()
+    {
+        if (closed || renderedFrom <= 0) return;
+        int to = renderedFrom;
+        int from = Math.Max(0, to - OlderBatch);
+        while (from > 0 && !turns[from].FromUser) from--;
+
+        scroller.UpdateLayout();
+        double extentBefore = scroller.ExtentHeight;
+        double offsetBefore = scroller.VerticalOffset;
+        bool atEnd = followLatest;
+        int insertAt = olderButton != null && messages.Children.Contains(olderButton) ? 1 : 0;
+
+        // RenderTurn adds at the end, so what it adds is then moved to the top, in order.
+        int countBefore = messages.Children.Count;
+        for (int i = from; i < to; i++) RenderTurn(turns[i]);
+        List<UIElement> added = new List<UIElement>();
+        for (int i = countBefore; i < messages.Children.Count; i++) added.Add(messages.Children[i]);
+        messages.Children.RemoveRange(countBefore, added.Count);
+        for (int i = 0; i < added.Count; i++) messages.Children.Insert(insertAt + i, added[i]);
+        renderedFrom = from;
+        ShowOlderButton();
+        UpdateReplyActions();
+
+        if (!atEnd)
+        {
+            scroller.UpdateLayout();
+            scroller.ScrollToVerticalOffset(offsetBefore + scroller.ExtentHeight - extentBefore);
+        }
+    }
+
+    void ShowOlderButton()
+    {
+        if (olderButton == null)
+        {
+            TextBlock label = new TextBlock();
+            label.Text = "Load earlier messages";
+            label.FontSize = 12;
+            label.Foreground = WidgetWindow.Muted;
+            olderButton = new Border();
+            olderButton.Child = label;
+            olderButton.Padding = new Thickness(12, 5, 12, 6);
+            olderButton.CornerRadius = new CornerRadius(12);
+            olderButton.Background = WidgetWindow.OverlaySoft;
+            olderButton.HorizontalAlignment = HorizontalAlignment.Center;
+            olderButton.Margin = new Thickness(0, 0, 0, 10);
+            olderButton.Cursor = Cursors.Hand;
+            System.Windows.Automation.AutomationProperties.SetName(olderButton, "Load earlier messages");
+            MakeButton(olderButton, RenderOlder);
+        }
+        bool shown = messages.Children.Contains(olderButton);
+        if (renderedFrom > 0 && !shown) messages.Children.Insert(0, olderButton);
+        if (renderedFrom == 0 && shown) messages.Children.Remove(olderButton);
     }
 
     // Draws one saved turn at the end of the conversation.
@@ -7832,6 +7893,20 @@ class ChatWindow : Window
             else if (followLatest)
             {
                 scroller.ScrollToEnd();
+            }
+
+            // Within one screen of the top, the next older turns are drawn, once per batch. This comes after followLatest is
+            // updated above. While the view follows the end, only when it's actually there: right after opening, it starts
+            // at the top for a moment before reaching the end.
+            if (renderedFrom > 0 && !olderPending && scroller.ViewportHeight > 0 && scroller.VerticalOffset < scroller.ViewportHeight
+                && (!followLatest || scroller.VerticalOffset >= scroller.ScrollableHeight - 8))
+            {
+                olderPending = true;
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                {
+                    olderPending = false;
+                    RenderOlder();
+                }));
             }
         };
         scroller.PreviewMouseWheel += delegate(object s, MouseWheelEventArgs e)
