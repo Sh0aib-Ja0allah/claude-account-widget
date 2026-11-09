@@ -5404,6 +5404,11 @@ class SettingsWindow : Window
     readonly Border updateKnob = new Border();
     readonly TextBox shortcutBox = new TextBox();
     readonly TextBlock shortcutHint = new TextBlock();
+    readonly TextBox instructionsBox = new TextBox();
+    readonly TextBlock instructionsCount = new TextBlock();
+    readonly TextBlock instructionsNotice = new TextBlock();
+    string loadedInstructions = "";
+    internal const string InstructionsTooLongNotice = "Your saved instructions are longer than 4,000 characters, so new chats start without them. Shorten them to use them again.";
     string capturedShortcut;
     readonly Border laptopWarning = new Border();
     readonly TextBlock message = new TextBlock();
@@ -5475,6 +5480,7 @@ class SettingsWindow : Window
         readLines.Clear();
         readLines.AddRange(loadedRead);
         laptopOn = ReadRaw(AccessName).Trim().Equals("laptop", StringComparison.OrdinalIgnoreCase);
+        loadedInstructions = ReadRaw(ChatInstructions.FileName);
     }
 
     string ReadRaw(string name)
@@ -5536,6 +5542,8 @@ class SettingsWindow : Window
         stack.Children.Add(add);
         stack.Children.Add(Hint("Whatever Claude reads goes to Anthropic. This doesn't let Claude change these folders.", true));
         ShowReadList();
+
+        stack.Children.Add(BuildInstructionsRow());
 
         stack.Children.Add(BuildShortcutRow());
 
@@ -5645,6 +5653,58 @@ class SettingsWindow : Window
         header.Children.Add(title);
         header.MouseLeftButtonDown += delegate { DragMove(); };
         return header;
+    }
+
+    // A file edited by hand can be longer than the limit: MaxLength only stops typing, so the box shows all of it,
+    // the count shows the real number, and the notice says why new chats start without it.
+    UIElement BuildInstructionsRow()
+    {
+        StackPanel row = new StackPanel();
+        Grid title = new Grid();
+        title.ColumnDefinitions.Add(new ColumnDefinition());
+        title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        TextBlock heading = Heading("Saved instructions");
+        instructionsCount.FontSize = 11;
+        instructionsCount.VerticalAlignment = VerticalAlignment.Bottom;
+        instructionsCount.Margin = new Thickness(8, 0, 0, 5);
+        Grid.SetColumn(instructionsCount, 1);
+        title.Children.Add(heading);
+        title.Children.Add(instructionsCount);
+        row.Children.Add(title);
+
+        StyleBox(instructionsBox);
+        instructionsBox.AcceptsReturn = true;
+        instructionsBox.TextWrapping = TextWrapping.Wrap;
+        instructionsBox.MaxLength = ChatInstructions.Limit;
+        instructionsBox.MinHeight = 66;
+        instructionsBox.MaxHeight = 150;
+        instructionsBox.VerticalContentAlignment = VerticalAlignment.Top;
+        // Scrolls by wheel and keyboard with no visible bar, like the window itself, because the bar wouldn't follow the theme.
+        instructionsBox.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+        instructionsBox.Text = loadedInstructions;
+        AutomationName(instructionsBox, "Saved instructions");
+        instructionsBox.TextChanged += delegate { ShowInstructionsCount(); };
+        row.Children.Add(instructionsBox);
+
+        instructionsNotice.Text = InstructionsTooLongNotice;
+        instructionsNotice.FontSize = 11;
+        instructionsNotice.TextWrapping = TextWrapping.Wrap;
+        instructionsNotice.Foreground = warnText;
+        instructionsNotice.Margin = new Thickness(0, 4, 0, 0);
+        row.Children.Add(instructionsNotice);
+        row.Children.Add(Hint("Sent with every new chat. Chats already open keep what they started with.", false));
+        ShowInstructionsCount();
+        return row;
+    }
+
+    void ShowInstructionsCount()
+    {
+        int count = ChatInstructions.Normalize(instructionsBox.Text).Length;
+        bool over = count > ChatInstructions.Limit;
+        instructionsCount.Text = count.ToString("N0", CultureInfo.InvariantCulture) + " / " + ChatInstructions.Limit.ToString("N0", CultureInfo.InvariantCulture);
+        instructionsCount.Foreground = over ? (Brush)warnText : WidgetWindow.Muted;
+        instructionsNotice.Visibility = over ? Visibility.Visible : Visibility.Collapsed;
+        AutomationName(instructionsCount, count.ToString(CultureInfo.InvariantCulture) + " of " + ChatInstructions.Limit.ToString(CultureInfo.InvariantCulture) + " characters");
     }
 
     UIElement BuildShortcutRow()
@@ -5949,6 +6009,8 @@ class SettingsWindow : Window
         bool expectedChanged = expected != loadedExpected;
         bool historyChanged = history != loadedHistory;
         bool readChanged = !SameLines(readLines, loadedRead);
+        string instructionsText = instructionsBox.Text;
+        bool instructionsChanged = instructionsText != loadedInstructions;
 
         string problem = historyChanged ? HistoryProblem(history) : null;
         if (problem != null)
@@ -5956,7 +6018,7 @@ class SettingsWindow : Window
             ShowMessage(problem + " Nothing was saved.", true);
             return;
         }
-        if (!expectedChanged && !historyChanged && !readChanged)
+        if (!expectedChanged && !historyChanged && !readChanged && !instructionsChanged)
         {
             ShowMessage("Nothing to save.", false);
             return;
@@ -5977,6 +6039,12 @@ class SettingsWindow : Window
         {
             if (Try(delegate { WriteOrDelete(ReadName, readLines.Count == 0 ? "" : string.Join("\r\n", readLines) + "\r\n"); })) loadedRead = new List<string>(readLines);
             else failed.Add(ReadName);
+        }
+        if (instructionsChanged)
+        {
+            // Text over the limit is still saved, but it isn't used; the notice under the box stays.
+            if (Try(delegate { ChatInstructions.Save(dataFolder, instructionsText); })) loadedInstructions = instructionsText;
+            else failed.Add(ChatInstructions.FileName);
         }
         if (failed.Count > 0) ShowMessage("Couldn't save " + string.Join(", ", failed) + ". Check that the file isn't read-only or open elsewhere. Anything else was saved.", true);
         else ShowMessage("Saved.", false);
@@ -6501,10 +6569,20 @@ class ChatWindow : Window
     string instructions;
     bool instructionsTooLong;
 
+    readonly TextBlock instructionsHint = new TextBlock();
+
     void TakeInstructions()
     {
         instructions = ChatInstructions.Read(settingsFolder, out instructionsTooLong);
         if (noteWriter != null) noteWriter.Instructions = instructions;
+        ShowInstructionsHint();
+    }
+
+    void ShowInstructionsHint()
+    {
+        instructionsHint.Text = instructions != null ? "Using your saved instructions."
+            : instructionsTooLong ? "Saved instructions not used (too long). See Settings." : "";
+        instructionsHint.Visibility = instructionsHint.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     public ChatWindow(string dataFolder)
@@ -7585,6 +7663,7 @@ class ChatWindow : Window
         instructions = savedInstructions;
         instructionsTooLong = false;
         noteWriter.Instructions = instructions;
+        ShowInstructionsHint();
         foreach (ChatTurn turn in turns)
         {
             if (turn.FromUser)
@@ -7667,8 +7746,14 @@ class ChatWindow : Window
         line.Margin = new Thickness(24, 12, 24, 0);
         emptyState.VerticalAlignment = VerticalAlignment.Center;
         emptyState.IsHitTestVisible = false;
+        instructionsHint.Foreground = WidgetWindow.Muted;
+        instructionsHint.FontSize = 12;
+        instructionsHint.TextAlignment = TextAlignment.Center;
+        instructionsHint.TextWrapping = TextWrapping.Wrap;
+        instructionsHint.Margin = new Thickness(24, 6, 24, 0);
         emptyState.Children.Add(spark);
         emptyState.Children.Add(line);
+        emptyState.Children.Add(instructionsHint);
 
         messages.Margin = new Thickness(0, 0, 8, 0);
         messages.MaxWidth = ReadableWidth;

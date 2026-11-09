@@ -7,6 +7,11 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Text.RegularExpressions;
 // Saved instructions for new chats (v0.3.0): reading, normalising, the 4,000-character limit and saving.
 // In process, on fake data folders only; no claude is ever started. saved-instructions.exe <out folder>
@@ -31,6 +36,7 @@ static class H17
     static void Write(string d, string text) { File.WriteAllText(FileIn(d), text, new UTF8Encoding(false)); }
     static string Show(string s) { return s == null ? "null" : s.Length > 60 ? s.Substring(0, 60) + "... (" + s.Length + ")" : s; }
 
+    [STAThread]
     static void Main(string[] args)
     {
         root = args[0];
@@ -38,7 +44,19 @@ static class H17
         Directory.CreateDirectory(root);
         try { Store(); Launch(); Notes(); }
         catch (Exception e) { Log("HARNESS ERROR " + e); fails++; }
-        Log("passes=" + passes + " fails=" + fails);
+
+        // The Settings and chat checks need WPF; their windows stay off screen.
+        Application app = new Application();
+        app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        app.DispatcherUnhandledException += (sender, args2) => { Log("UNHANDLED " + args2.Exception); fails++; args2.Handled = true; };
+        app.Startup += async delegate
+        {
+            try { await SettingsBox(); }
+            catch (Exception e) { Log("HARNESS ERROR " + e); fails++; }
+            Log("passes=" + passes + " fails=" + fails);
+            Process.GetCurrentProcess().Kill();
+        };
+        app.Run();
     }
 
     // H17-01 to 08
@@ -354,6 +372,147 @@ static class H17
         path = SaveNote(folder, "Real ones", quoting);
         read = ChatNoteWriter.TryRead(path, out back, out started, out title, out instructions);
         Check("H17-36 with real instructions too, only the real ones come back", read && instructions == "Real ones" && SameTurns(back, quoting));
+    }
+
+    // ---------- H17-40 to 46: the Settings box; H17-50, 51: the chat's hint ----------
+    static object GetField(object o, string f) { return o.GetType().GetField(f, Any).GetValue(o); }
+    static object CallOn(object o, string m, params object[] a)
+    {
+        MethodInfo info = o.GetType().GetMethods(Any).First(x => x.Name == m && x.GetParameters().Length == a.Length);
+        return info.Invoke(o, a);
+    }
+
+    static void WalkFocusable(DependencyObject node, List<string> names)
+    {
+        UIElement e = node as UIElement;
+        if (e != null && e.Focusable && KeyboardNavigation.GetIsTabStop(e) && (e is TextBox || e is Border))
+        {
+            string name = System.Windows.Automation.AutomationProperties.GetName(e);
+            names.Add(name.Length > 0 ? name : "(unnamed " + e.GetType().Name + ")");
+        }
+        int count = VisualTreeHelper.GetChildrenCount(node);
+        for (int i = 0; i < count; i++) WalkFocusable(VisualTreeHelper.GetChild(node, i), names);
+    }
+
+    static string WindowData(string name, string instructionsFile)
+    {
+        string d = Fresh(name);
+        File.WriteAllText(Path.Combine(d, "settings.txt"), "-6000,0,0,0,default,system");
+        if (instructionsFile != null) File.WriteAllText(Path.Combine(d, ChatInstructions.FileName), instructionsFile, new UTF8Encoding(false));
+        return d;
+    }
+
+    static SettingsWindow OpenSettings(string d, out WidgetWindow owner)
+    {
+        owner = new WidgetWindow(d, Path.Combine(root, "account.json"), null, null, 300, 0, true);
+        SettingsWindow sw = new SettingsWindow(owner, d);
+        sw.MaxHeight = SettingsWindow.FitHeight(768);
+        CallOn(owner, "ShowOffScreen", sw);
+        sw.UpdateLayout();
+        return sw;
+    }
+
+    static async Task SettingsBox()
+    {
+        File.WriteAllText(Path.Combine(root, "account.json"), "{\"oauthAccount\":{\"emailAddress\":\"sample@example.com\",\"planDisplayName\":\"Max\"}}");
+        WidgetWindow owner;
+
+        // H17-40, 41, 42: an empty start, the limit, the counter and Save
+        string d = WindowData("set-empty", null);
+        SettingsWindow sw = OpenSettings(d, out owner);
+        TextBox box = (TextBox)GetField(sw, "instructionsBox");
+        TextBlock count = (TextBlock)GetField(sw, "instructionsCount");
+        TextBlock notice = (TextBlock)GetField(sw, "instructionsNotice");
+        Check("H17-40 the box: empty, multi-line, limited to 4,000 typed characters", box.Text == "" && box.AcceptsReturn && box.MaxLength == 4000 && box.TextWrapping == TextWrapping.Wrap);
+        Check("H17-40 named for screen readers, with the hint below", System.Windows.Automation.AutomationProperties.GetName(box) == "Saved instructions"
+            && FindText(sw, "Sent with every new chat. Chats already open keep what they started with."));
+        Check("H17-41 the counter starts at 0 / 4,000 and the notice is hidden", count.Text == "0 / 4,000" && notice.Visibility == Visibility.Collapsed, count.Text);
+        box.Text = "Answer in short paragraphs.\r\nUse metric units.";
+        Check("H17-41 the counter follows the text, a line break counting once", count.Text == "45 / 4,000", count.Text);
+        CallOn(sw, "Save");
+        string file = Path.Combine(d, ChatInstructions.FileName);
+        Check("H17-42 Save writes chat-instructions.txt as typed", File.Exists(file) && File.ReadAllText(file) == "Answer in short paragraphs.\r\nUse metric units.");
+        Check("H17-42 and says Saved", ((TextBlock)GetField(sw, "message")).Text == "Saved.", ((TextBlock)GetField(sw, "message")).Text);
+        CallOn(sw, "Save");
+        Check("H17-42 saving again with no change: Nothing to save", ((TextBlock)GetField(sw, "message")).Text == "Nothing to save.");
+        box.Text = "   ";
+        CallOn(sw, "Save");
+        Check("H17-43 an empty box deletes the file", !File.Exists(file));
+        sw.Close(); owner.Close();
+
+        // H17-44, 45: the layout fits a 768-high work area, and Tab reaches the box between the read folders and the shortcut
+        d = WindowData("set-layout", new string('w', 3000).Replace("wwwwwwwwww", "word word "));
+        sw = OpenSettings(d, out owner);
+        await Task.Delay(100);
+        sw.UpdateLayout();
+        Check("H17-44 Settings stays 441 wide (within display rounding) and at most 756 tall with a long text", Math.Abs(sw.ActualWidth - 441) < 0.5 && sw.ActualHeight <= 756.5, sw.Width + " / " + sw.ActualWidth.ToString("F2") + " x " + sw.ActualHeight.ToString("F2") + " max " + sw.MaxHeight);
+        box = (TextBox)GetField(sw, "instructionsBox");
+        Check("H17-44 the box grows only to its own limit and scrolls inside", box.ActualHeight <= 150.5 && box.VerticalScrollBarVisibility == ScrollBarVisibility.Hidden, box.ActualHeight.ToString("F0"));
+        List<string> order = new List<string>();
+        WalkFocusable(sw, order);
+        string joined = string.Join(" > ", order);
+        int at = order.IndexOf("Saved instructions");
+        Check("H17-45 Tab order: after the read folders' Add folder, before the shortcut, Close and Save still last", at > 0 && order[at - 1] == "Add folder"
+            && order.IndexOf("New chat shortcut") > at && order[order.Count - 2] == "Close" && order[order.Count - 1] == "Save", joined);
+        sw.Close(); owner.Close();
+
+        // H17-46: a file over the limit
+        foreach (int size in new[] { 4001, 6000 })
+        {
+            string big = new string('a', size - 2) + "\r\nb";
+            d = WindowData("set-over-" + size, big);
+            sw = OpenSettings(d, out owner);
+            box = (TextBox)GetField(sw, "instructionsBox");
+            count = (TextBlock)GetField(sw, "instructionsCount");
+            notice = (TextBlock)GetField(sw, "instructionsNotice");
+            string real = size.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+            Check("H17-46 " + size + ": the box shows the whole text, uncut", box.Text == big, box.Text.Length.ToString());
+            Check("H17-46 " + size + ": the counter shows the real count in the warning colour", count.Text == real + " / 4,000"
+                && count.Foreground == notice.Foreground, count.Text);
+            Check("H17-46 " + size + ": the notice is shown, with the plan's wording", notice.Visibility == Visibility.Visible
+                && notice.Text == "Your saved instructions are longer than 4,000 characters, so new chats start without them. Shorten them to use them again.");
+            CallOn(sw, "Save");
+            Check("H17-46 " + size + ": with no change there's nothing to save and the file stays", File.ReadAllText(Path.Combine(d, ChatInstructions.FileName)) == big);
+            box.Text = big + " more";
+            CallOn(sw, "Save");
+            bool tooLong;
+            Check("H17-46 " + size + ": saving text still over the limit keeps it on disk, unused, with the notice", File.ReadAllText(Path.Combine(d, ChatInstructions.FileName)) == big + " more"
+                && ChatInstructions.Read(d, out tooLong) == null && tooLong && notice.Visibility == Visibility.Visible);
+            box.Text = new string('a', 4000);
+            Check("H17-46 " + size + ": shortened to 4,000, the notice goes and the counter is normal", notice.Visibility == Visibility.Collapsed && count.Text == "4,000 / 4,000" && count.Foreground != notice.Foreground, count.Text);
+            CallOn(sw, "Save");
+            Check("H17-46 " + size + ": saved at 4,000 it's used again", ChatInstructions.Read(d) == new string('a', 4000));
+            sw.Close(); owner.Close();
+        }
+
+        // H17-50, 51: the chat's empty state
+        d = WindowData("hint-on", "Be brief.");
+        ChatWindow chat = new ChatWindow(d);
+        TextBlock hint = (TextBlock)GetField(chat, "instructionsHint");
+        Check("H17-50 a chat with instructions says so while it's empty", hint.Text == "Using your saved instructions." && hint.Visibility == Visibility.Visible, hint.Text);
+        File.Delete(Path.Combine(d, ChatInstructions.FileName));
+        CallOn(chat, "StartNewChat");
+        Check("H17-50 New chat without instructions: no line", hint.Visibility == Visibility.Collapsed);
+        chat.Close();
+        d = WindowData("hint-over", new string('a', 4001));
+        chat = new ChatWindow(d);
+        hint = (TextBlock)GetField(chat, "instructionsHint");
+        Check("H17-51 a file over the limit: the chat says they weren't used", hint.Text == "Saved instructions not used (too long). See Settings." && hint.Visibility == Visibility.Visible, hint.Text);
+        Check("H17-51 and the chat has no instructions", GetField(chat, "instructions") == null && (bool)GetField(chat, "instructionsTooLong"));
+        chat.Close();
+        d = WindowData("hint-none", null);
+        chat = new ChatWindow(d);
+        Check("H17-50 no file: no line", ((TextBlock)GetField(chat, "instructionsHint")).Visibility == Visibility.Collapsed);
+        chat.Close();
+    }
+
+    static bool FindText(DependencyObject node, string text)
+    {
+        TextBlock t = node as TextBlock;
+        if (t != null && t.Text == text) return true;
+        int count = VisualTreeHelper.GetChildrenCount(node);
+        for (int i = 0; i < count; i++) if (FindText(VisualTreeHelper.GetChild(node, i), text)) return true;
+        return false;
     }
 }
 

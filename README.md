@@ -22,7 +22,8 @@ This is an early pre-release, so expect some rough edges.
 - **Usage history:** a chart of the current 7-day period against an even pace, and the peak of each of the last 8 periods. A row is recorded at each usage check, so a gap means no check ran, for example while Anthropic had paused checks.
 - **Usage alerts:** optional Windows notifications when your 7-day usage reaches 70% and 90%, and when the limit resets. Off until you turn them on in Settings.
 - **Update notice:** once a day it asks GitHub whether a newer version has been released, and shows a line on the widget if so. It never downloads or installs anything.
-- **Settings:** a window for the new chat shortcut, usage alerts, update checks, the expected account, chat history folder, folders chats can read and laptop access, so you don't have to write the files by hand.
+- **Settings:** a window for the new chat shortcut, usage alerts, update checks, the expected account, chat history folder, folders chats can read, saved instructions and laptop access, so you don't have to write the files by hand.
+- **Saved instructions:** standing instructions, such as how you like answers written, sent with every new chat.
 - **Account menu in chats:** in a full-screen chat, your account sits at the bottom of the chat list, with the widget's menu and a shortcut to Settings.
 - **New chat:** opens chat windows that use your Claude Code sign-in, show formatted replies as they're written, save to a folder you choose and can look back at earlier saved chats.
 
@@ -168,6 +169,8 @@ Each setting is a text file in the folder where the widget is installed, so you 
 
 **Folders every chat can read:** create `chat-read-folders.txt` with one full folder path per line, such as your Obsidian vault. Settings marks a folder that can't be found, such as one on a drive that isn't connected, and keeps it until you remove it. Every new chat window can search and read them and is told to look there when you ask about your notes. Whatever Claude reads goes to Anthropic. This doesn't let Claude change those folders. Without laptop access it can't edit anything, and with it, each edit still needs your approval.
 
+**Saved instructions:** type them in the Settings box, or write them in `chat-instructions.txt`, up to 4,000 characters. Every new chat window sends them to Claude ahead of the widget's own rules, which still apply. The text goes in a temporary file, not on a command line, and that file is deleted when each reply ends. Chats already open keep what they started with; **New chat** picks up a change. A chat window shows "Using your saved instructions." while it's empty. If the file is longer than 4,000 characters, for example after editing it by hand, it isn't used at all: new chats start without it, Settings shows the whole text with the real count and says why, and a new chat says "Saved instructions not used (too long). See Settings." A saved chat's note records the instructions it started with, in a "Saved instructions" section, so a reopened chat continues with those rather than today's. Notes saved before version 0.3.0 continue with none.
+
 **Laptop access for chats:** create `chat-access.txt` containing only `laptop`, or turn it on in Settings, which shows this list first. New chat windows can then:
 
 - Read files on your fixed drives, without asking. What Claude reads goes to Anthropic.
@@ -198,6 +201,8 @@ Read a card before you allow it, because a command can do anything your Windows 
 | `https://api.anthropic.com/api/oauth/profile` | Receives the token to confirm which account it belongs to, after a successful usage check: when the token changes, on each check until it's confirmed, then at most once an hour |
 | `https://api.github.com/repos/Sh0aib-Ja0allah/claude-account-widget/releases?per_page=5` | Asked once a day for new releases, unless you turn update checks off in Settings. GitHub sees your IP address. No token, email or other account detail is sent |
 | `claude -p` | Runs once for each chat message, using your Claude Code sign-in |
+| `chat-instructions.txt` | Your saved instructions, if any. Read when a chat window starts or you click **New chat** |
+| A temporary file in `%TEMP%\ClaudeAccountWidget-chat` | Holds the saved instructions and the widget's rules for one `claude -p` request, so they never appear on a command line. Deleted when the reply ends; any left by a crash are removed after a day |
 | Your chat history folder | Claude can search and read its notes, and the widget writes one note for each chat |
 | Your files and web search | Only with laptop access on. See [Optional settings](#optional-settings) |
 

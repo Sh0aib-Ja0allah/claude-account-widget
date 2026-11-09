@@ -1488,7 +1488,7 @@ static class H3
         ChatWindow tooLong = NewWindow();
         await Task.Delay(200);
         await Exchange(tooLong, "with a file over the limit", "seven");
-        Check("H17-20 a file over the limit isn't sent", !LastPrompt().Contains(Preamble()) && (bool)Get(tooLong, "instructionsTooLong"));
+        Check("H17-46 a new chat with a file over the limit sends the rules only", !LastPrompt().Contains(Preamble()) && (bool)Get(tooLong, "instructionsTooLong"));
         tooLong.Close();
         SaveInstructions(null);
         ChatWindow none = NewWindow();
