@@ -157,7 +157,7 @@ function Run-Chat {
     $problem = Invoke-Csc $exe 'H3' ($src + (Join-Path $tests 'suites\chat\chat-window.cs'))
     if ($problem) { Add-Result 'chat' 0 1 '' 0 "build failed: $problem"; return }
     # Each mode gets its own process and its own history folder (one shared folder makes search fail).
-    foreach ($m in 'format', 'live', 'regen', 'edit', 'search') { Invoke-Suite "chat-$m" $exe @($m, (Join-Path $out "chat-$m\run"), $fake) }
+    foreach ($m in 'format', 'live', 'regen', 'edit', 'search', 'instructions') { Invoke-Suite "chat-$m" $exe @($m, (Join-Path $out "chat-$m\run"), $fake) }
     Invoke-Suite 'chat-crash' $exe @('crash', (Join-Path $out 'chat-crash\run'), $fake) -Survive
 }
 

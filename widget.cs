@@ -3861,6 +3861,8 @@ class ChatRequest
     public List<string> Folders = new List<string>();
     public List<string> Links = new List<string>();
     public List<string> ReadFolders = new List<string>();
+    // The user's saved instructions this chat started with, or null.
+    public string Instructions;
     public string DefaultOutputFolder;
     public Func<string> CurrentOutputFolder;
     public Func<Task<string>> ResolveOutputFolder;
@@ -3883,7 +3885,8 @@ class ChatResult
 }
 
 // Runs one `claude -p` request. Message text only travels through stdin, because
-// other processes can see command lines, and it's never written anywhere from here.
+// other processes can see command lines, and it's never written anywhere from here. The system prompt text (the
+// saved instructions and the widget's rules) goes in a temporary file for the same reason, deleted when the request ends.
 class ChatClient
 {
     const string StyleRule = "You are chatting in a desktop chat window that shows Markdown: headings, bold, italics, lists, tables, code blocks and links. " +
@@ -4008,7 +4011,72 @@ class ChatClient
         return rule.ToString();
     }
 
-    static ProcessStartInfo BuildStart(string claude, ChatRequest request)
+    static string Rules(ChatRequest request)
+    {
+        bool canRead = request.MemoryFolder != null || request.Folders.Count > 0 || request.ReadFolders.Count > 0;
+        bool hasLinks = request.Links.Count > 0;
+        return StyleRule + (request.MemoryFolder != null ? RecallRule : NoRecallRule) +
+            (request.Laptop ? LaptopRule : canRead ? FolderOnlyRule : "") +
+            (hasLinks ? LinkRule : "") + ReadFoldersRule(request) + OutputRule(request) + DataRule;
+    }
+
+    // The user's saved instructions come first, then the widget's rules, so the rules (ending with DataRule) have the last word.
+    internal const string InstructionsPreamble = "The user saved these standing instructions for new chats. Follow them unless they conflict with the rules that follow.";
+
+    internal static string SystemPromptText(ChatRequest request)
+    {
+        string rules = Rules(request);
+        if (string.IsNullOrEmpty(request.Instructions)) return rules;
+        return InstructionsPreamble + "\n\n" + request.Instructions + "\n\n" + rules;
+    }
+
+    internal static string PromptFolder()
+    {
+        return Path.Combine(Path.GetTempPath(), "ClaudeAccountWidget-chat");
+    }
+
+    // Writes this request's system prompt file. Files left over from a crash are removed after a day.
+    internal static string WritePromptFile(ChatRequest request)
+    {
+        string folder = PromptFolder();
+        Directory.CreateDirectory(folder);
+        try
+        {
+            foreach (string old in Directory.GetFiles(folder, "*.txt"))
+            {
+                try
+                {
+                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(old) > TimeSpan.FromDays(1)) File.Delete(old);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        string path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".txt");
+        File.WriteAllText(path, SystemPromptText(request), new UTF8Encoding(false));
+        return path;
+    }
+
+    static void DeletePromptFile(string path)
+    {
+        // The process may hold the file for a moment after it ends.
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                return;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            Thread.Sleep(100);
+        }
+    }
+
+    // The prompt file's path uses forward slashes, like the other paths, so a backslash never escapes the closing quote.
+    static ProcessStartInfo BuildStart(string claude, ChatRequest request, string promptFile)
     {
         bool canRead = request.MemoryFolder != null || request.Folders.Count > 0 || request.ReadFolders.Count > 0;
         bool hasLinks = request.Links.Count > 0;
@@ -4020,16 +4088,13 @@ class ChatClient
             if (hasLinks) toolList.Add("WebFetch");
         }
         string tools = string.Join(",", toolList.ToArray());
-        string rules = StyleRule + (request.MemoryFolder != null ? RecallRule : NoRecallRule) +
-            (request.Laptop ? LaptopRule : canRead ? FolderOnlyRule : "") +
-            (hasLinks ? LinkRule : "") + ReadFoldersRule(request) + OutputRule(request) + DataRule;
         string arguments =
             "-p --safe-mode --restricted --no-session-persistence --strict-mcp-config " +
             "--permission-mode manual --permission-prompt-tool stdio " +
             "--input-format stream-json --output-format stream-json --verbose --include-partial-messages " +
             (request.Model.Length > 0 ? "--model " + request.Model + " " : "") +
             (request.Effort.Length > 0 ? "--effort " + request.Effort + " " : "") +
-            "--tools \"" + tools + "\" --append-system-prompt \"" + rules + "\"" +
+            "--tools \"" + tools + "\" --append-system-prompt-file \"" + promptFile.Replace('\\', '/') + "\"" +
             AccessArguments(request);
 
         ProcessStartInfo start = new ProcessStartInfo();
@@ -4067,10 +4132,29 @@ class ChatClient
         string claude = FindClaude();
         if (claude == null) return new ChatResult(ChatOutcome.NotFound, null);
 
+        string promptFile;
+        try
+        {
+            promptFile = WritePromptFile(chat);
+        }
+        catch (IOException) { return new ChatResult(ChatOutcome.Failed, null); }
+        catch (UnauthorizedAccessException) { return new ChatResult(ChatOutcome.Failed, null); }
+        try
+        {
+            return await RunRequest(claude, chat, approve, promptFile);
+        }
+        finally
+        {
+            DeletePromptFile(promptFile);
+        }
+    }
+
+    async Task<ChatResult> RunRequest(string claude, ChatRequest chat, Func<string, string, Task<bool>> approve, string promptFile)
+    {
         Process running = new Process();
         try
         {
-            running.StartInfo = BuildStart(claude, chat);
+            running.StartInfo = BuildStart(claude, chat, promptFile);
             running.Start();
         }
         catch (System.ComponentModel.Win32Exception)

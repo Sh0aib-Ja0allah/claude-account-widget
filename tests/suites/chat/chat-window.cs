@@ -101,7 +101,7 @@ static class H3
             return;
         }
         // No mode makes a real Claude request: the old "real" mode was removed when the tests moved into the repo.
-        string[] sections = { "format", "live", "regen", "edit", "search" };
+        string[] sections = { "format", "live", "regen", "edit", "search", "instructions" };
         foreach (string section in sections)
         {
             if (mode != "all" && mode != section) continue;
@@ -113,6 +113,7 @@ static class H3
                 if (section == "regen") await Regen();
                 if (section == "edit") await Edit();
                 if (section == "search") await Search();
+                if (section == "instructions") await Instructions();
             }
             catch (Exception e) { Log("FAIL section " + section + " threw: " + e); fails++; }
         }
@@ -874,7 +875,7 @@ static class H3
         ReplyScript("haiku answer");
         Press(w, Turns(w).Last().Regenerate, Key.Enter);
         await Task.Delay(50); await Idle(w);
-        Check("regen uses the model chosen now", File.ReadAllLines(Path.Combine(root, "fake-log.txt")).Reverse().Skip(1).First().Contains("--model haiku"));
+        Check("regen uses the model chosen now", File.ReadAllLines(Path.Combine(root, "fake-log.txt")).Last(l => l.StartsWith("ARGS ")).Contains("--model haiku"));
         Set(w, "modelChoice", "opus");
 
         // a window resized while the reply is out
@@ -1308,5 +1309,118 @@ static class H3
         };
         walk(d);
         return all;
+    }
+
+    // ---------- saved instructions: the system prompt file (C-I1 to C-I3), through the .cmd route ----------
+    static List<string> FakeLines(string prefix)
+    {
+        string log = Path.Combine(root, "fake-log.txt");
+        if (!File.Exists(log)) return new List<string>();
+        return File.ReadAllLines(log, new UTF8Encoding(false)).Where(l => l.StartsWith(prefix)).Select(l => l.Substring(prefix.Length)).ToList();
+    }
+    static string Unescape(string s)
+    {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '\\' && i + 1 < s.Length)
+            {
+                char c = s[++i];
+                b.Append(c == 'n' ? '\n' : c == 'r' ? '\r' : c);
+            }
+            else b.Append(s[i]);
+        }
+        return b.ToString();
+    }
+
+    static ChatRequest InstructionsRequest(string instructions)
+    {
+        ChatRequest r = new ChatRequest();
+        r.Prompt = "Hello";
+        r.Model = "";
+        r.Effort = "";
+        r.Instructions = instructions;
+        return r;
+    }
+
+    static async Task<ChatResult> AskOnce(ChatClient client, ChatRequest r)
+    {
+        return await client.Ask(r, delegate(string a, string b) { return Task.FromResult(false); });
+    }
+
+    static async Task Instructions()
+    {
+        const string Marker = "Always end with the word zebrafish";
+        string savedTemp = Environment.GetEnvironmentVariable("TEMP"), savedTmp = Environment.GetEnvironmentVariable("TMP");
+        // A temp folder with a space and cmd metacharacters, so the .cmd route's quoting is exercised.
+        string temp = Path.Combine(root, "t m&p^x (1)");
+        Directory.CreateDirectory(temp);
+        Environment.SetEnvironmentVariable("TEMP", temp);
+        Environment.SetEnvironmentVariable("TMP", temp);
+        try
+        {
+            string folder = (string)typeof(ChatClient).GetMethod("PromptFolder", Any).Invoke(null, null);
+            Check("C-I0 the prompt folder follows TEMP", folder == Path.Combine(temp, "ClaudeAccountWidget-chat"), folder);
+
+            // C-I1, C-I2: a reply
+            int before = FakeLines("ARGS ").Count;
+            Script(Sys, Result("Done zebrafish"));
+            ChatRequest r = InstructionsRequest(Marker);
+            ChatResult result = await AskOnce(new ChatClient(), r);
+            List<string> argsLines = FakeLines("ARGS ");
+            string args = argsLines.Count > before ? argsLines.Last() : "";
+            Check("C-I1 the reply arrives", result.Outcome == ChatOutcome.Reply && result.Text == "Done zebrafish", result.Outcome + " " + result.Text);
+            Check("C-I1 the command line has the prompt file and no inline rules", args.Contains("--append-system-prompt-file") && !args.Contains("--append-system-prompt \"")
+                && !args.Contains("You are chatting in a desktop chat window"), args.Length > 300 ? args.Substring(0, 300) : args);
+            Check("C-I1 the instructions never reach the command line", !args.Contains("zebrafish"));
+            string expected = (string)typeof(ChatClient).GetMethod("SystemPromptText", Any).Invoke(null, new object[] { r });
+            List<string> prompts = FakeLines("SYSPROMPT ");
+            string sent = prompts.Count > 0 ? Unescape(prompts.Last()) : null;
+            Check("C-I2 claude read the file through the .cmd route, with the temp path's space, & and ^", sent == expected, sent == null ? "nothing logged" : sent.Length + " vs " + expected.Length);
+            Check("C-I2 the instructions come first, the rules last", sent != null && sent.StartsWith((string)typeof(ChatClient).GetField("InstructionsPreamble", Any).GetValue(null) + "\n\n" + Marker + "\n\n")
+                && sent.EndsWith((string)typeof(ChatClient).GetField("DataRule", Any).GetValue(null)));
+            List<string> paths = FakeLines("SYSPROMPTFILE ");
+            string used = paths.Count > 0 ? paths.Last() : "";
+            Check("C-I3 the file was in the prompt folder and is gone after a reply", used.Replace('/', '\\').StartsWith(folder + "\\") && !File.Exists(used) && Directory.GetFiles(folder).Length == 0, used);
+
+            // No instructions: the file holds the rules only
+            Script(Sys, Result("Plain"));
+            ChatRequest plain = InstructionsRequest(null);
+            await AskOnce(new ChatClient(), plain);
+            prompts = FakeLines("SYSPROMPT ");
+            Check("C-I2 without instructions the file is the rules only", prompts.Count > 0 && Unescape(prompts.Last()) == (string)typeof(ChatClient).GetMethod("Rules", Any).Invoke(null, new object[] { plain }));
+
+            // C-I3: Stop
+            Script(Sys, "#wait");
+            ChatClient stopping = new ChatClient();
+            Task<ChatResult> pending = AskOnce(stopping, InstructionsRequest(Marker));
+            await Task.Delay(1500);
+            Check("C-I3 the file exists while the request runs", Directory.GetFiles(folder).Length == 1);
+            stopping.Stop();
+            ChatResult stopped = await pending;
+            Check("C-I3 the file is gone after Stop", stopped.Outcome == ChatOutcome.Stopped && Directory.GetFiles(folder).Length == 0, stopped.Outcome.ToString());
+
+            // C-I3: the child fails
+            Script(Sys, "#stderr something broke", "#exit 3");
+            ChatResult crashed = await AskOnce(new ChatClient(), InstructionsRequest(Marker));
+            Check("C-I3 the file is gone after the child fails", crashed.Outcome == ChatOutcome.Failed && Directory.GetFiles(folder).Length == 0, crashed.Outcome.ToString());
+
+            // C-I3: the time limit (shortened for the test)
+            FieldInfo limit = typeof(ChatClient).GetField("RequestLimit", Any);
+            object savedLimit = limit.GetValue(null);
+            limit.SetValue(null, TimeSpan.FromSeconds(2));
+            try
+            {
+                Script(Sys, "#wait");
+                ChatResult timedOut = await AskOnce(new ChatClient(), InstructionsRequest(Marker));
+                Check("C-I3 the file is gone after a time-out", timedOut.Outcome == ChatOutcome.TimedOut && Directory.GetFiles(folder).Length == 0, timedOut.Outcome.ToString());
+            }
+            finally { limit.SetValue(null, savedLimit); }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEMP", savedTemp);
+            Environment.SetEnvironmentVariable("TMP", savedTmp);
+        }
     }
 }

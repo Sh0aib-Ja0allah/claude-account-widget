@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 // Saved instructions for new chats (v0.3.0): reading, normalising, the 4,000-character limit and saving.
-// In process, on fake data folders only. saved-instructions.exe <out folder>
+// In process, on fake data folders only; no claude is ever started. saved-instructions.exe <out folder>
 static class H17
 {
     static string root;
@@ -31,7 +34,7 @@ static class H17
         root = args[0];
         if (Directory.Exists(root)) Directory.Delete(root, true);
         Directory.CreateDirectory(root);
-        try { Store(); }
+        try { Store(); Launch(); }
         catch (Exception e) { Log("HARNESS ERROR " + e); fails++; }
         Log("passes=" + passes + " fails=" + fails);
     }
@@ -103,5 +106,157 @@ static class H17
         Check("H17-08 Save over the limit keeps the text on disk but unused, and says so", !usable && File.ReadAllText(FileIn(d)) == exactly + "y"
             && ChatInstructions.Read(d, out tooLong) == null && tooLong);
         Check("H17-08 Save at the limit with CRLF line breaks is allowed", ChatInstructions.Save(d, exactly.Substring(0, 3998) + "\r\nz") && ChatInstructions.Read(d) == exactly.Substring(0, 3998) + "\nz");
+    }
+
+    // ---------- H17-10 to 16: launching through the system prompt file ----------
+    const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+    [DllImport("shell32.dll", SetLastError = true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string line, out int count);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+
+    static List<string> Tokens(string arguments)
+    {
+        int count;
+        IntPtr list = CommandLineToArgvW("x.exe " + arguments, out count);
+        List<string> tokens = new List<string>();
+        try
+        {
+            for (int i = 1; i < count; i++) tokens.Add(Marshal.PtrToStringUni(Marshal.ReadIntPtr(list, i * IntPtr.Size)));
+        }
+        finally { LocalFree(list); }
+        return tokens;
+    }
+
+    static object Static(string name, params object[] args)
+    {
+        MethodInfo m = typeof(ChatClient).GetMethods(Any).First(x => x.Name == name && x.GetParameters().Length == args.Length);
+        return m.Invoke(null, args);
+    }
+    static string Const(string name) { return (string)typeof(ChatClient).GetField(name, Any).GetValue(null); }
+
+    static ChatRequest Request(string instructions)
+    {
+        ChatRequest r = new ChatRequest();
+        r.Prompt = "Hello";
+        r.Model = "";
+        r.Effort = "";
+        r.Instructions = instructions;
+        return r;
+    }
+
+    // The 1768b9e argument list for a request, written out by hand, with the old inline rules flag.
+    static List<string> OldTokens(ChatRequest r, string tools, string rules, List<string> addDirs, string settings)
+    {
+        List<string> t = new List<string> { "-p", "--safe-mode", "--restricted", "--no-session-persistence", "--strict-mcp-config",
+            "--permission-mode", "manual", "--permission-prompt-tool", "stdio",
+            "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages" };
+        if (r.Model.Length > 0) { t.Add("--model"); t.Add(r.Model); }
+        if (r.Effort.Length > 0) { t.Add("--effort"); t.Add(r.Effort); }
+        t.Add("--tools"); t.Add(tools);
+        t.Add("--append-system-prompt"); t.Add(rules);
+        if (addDirs.Count > 0) { t.Add("--add-dir"); t.AddRange(addDirs); }
+        t.Add("--settings"); t.Add(settings);
+        t.Add("--disallowedTools");
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        foreach (string file in new[] { Path.Combine(home, ".claude", ".credentials.json"), Path.Combine(home, ".claude.json") })
+        {
+            string rule = "//" + file.Replace('\\', '/').Replace(":", "");
+            t.Add("Read(" + rule + ")"); t.Add("Edit(" + rule + ")"); t.Add("Write(" + rule + ")");
+        }
+        t.AddRange(new[] { "Bash(claude auth *)", "Bash(claude login*)", "Bash(claude logout*)", "Bash(*.credentials.json*)" });
+        return t;
+    }
+
+    static void Launch()
+    {
+        string savedTemp = Environment.GetEnvironmentVariable("TEMP"), savedTmp = Environment.GetEnvironmentVariable("TMP");
+        string temp = Path.Combine(root, "temp");
+        Directory.CreateDirectory(temp);
+        Environment.SetEnvironmentVariable("TEMP", temp);
+        Environment.SetEnvironmentVariable("TMP", temp);
+        try { LaunchChecks(temp); }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEMP", savedTemp);
+            Environment.SetEnvironmentVariable("TMP", savedTmp);
+        }
+    }
+
+    static void LaunchChecks(string temp)
+    {
+        const string Marker = "Answer like a pirate called Quillfeather";
+        string promptFile = Path.Combine(temp, "ClaudeAccountWidget-chat", "f.txt");
+        string settings = Path.Combine(temp, "ClaudeAccountWidget-ask-first.json");
+        string fileArg = promptFile.Replace('\\', '/');
+
+        // H17-10: three kinds of request; the only change from 1768b9e is the rules flag
+        ChatRequest plain = Request(Marker);
+        ChatRequest laptop = Request(Marker);
+        laptop.Laptop = true; laptop.Model = "opus"; laptop.Effort = "high";
+        laptop.DefaultOutputFolder = Path.Combine(root, "out folder");
+        laptop.CurrentOutputFolder = delegate { return null; };
+        ChatRequest reading = Request(null);
+        reading.MemoryFolder = Path.Combine(root, "memory");
+        reading.ReadFolders.Add(Path.Combine(root, "notes"));
+        reading.Links.Add("https://example.com/page");
+        List<string> drives = DriveInfo.GetDrives().Where(x => x.DriveType == DriveType.Fixed).Select(x => x.Name.Replace('\\', '/')).ToList();
+        var cases = new[]
+        {
+            new { Name = "plain", R = plain, Tools = "", Rules = Const("StyleRule") + Const("NoRecallRule") + Const("DataRule"), Dirs = new List<string>() },
+            new { Name = "laptop", R = laptop, Tools = "Read,Grep,Glob,Edit,Write,Bash,WebSearch,WebFetch",
+                Rules = Const("StyleRule") + Const("NoRecallRule") + Const("LaptopRule") + (string)Static("OutputRule", laptop) + Const("DataRule"), Dirs = drives },
+            new { Name = "reading", R = reading, Tools = "Read,Grep,Glob,WebFetch",
+                Rules = Const("StyleRule") + Const("RecallRule") + Const("FolderOnlyRule") + Const("LinkRule") + (string)Static("ReadFoldersRule", reading) + Const("DataRule"),
+                Dirs = reading.ReadFolders.Select(f => f.Replace('\\', '/')).ToList() },
+        };
+        foreach (var c in cases)
+        {
+            ProcessStartInfo start = (ProcessStartInfo)Static("BuildStart", Path.Combine(root, "claude.exe"), c.R, promptFile);
+            List<string> got = Tokens(start.Arguments);
+            List<string> want = OldTokens(c.R, c.Tools, c.Rules, c.Dirs, settings);
+            int at = want.IndexOf("--append-system-prompt");
+            want[at] = "--append-system-prompt-file";
+            want[at + 1] = fileArg;
+            int diff = Enumerable.Range(0, Math.Min(got.Count, want.Count)).FirstOrDefault(i => got[i] != want[i]);
+            Check("H17-10 " + c.Name + ": the flags are 1768b9e's with only the rules flag swapped for the file", got.SequenceEqual(want),
+                got.Count + " vs " + want.Count + " tokens; first difference at " + diff + ": " + (diff < got.Count ? got[diff] : "-") + " | " + (diff < want.Count ? want[diff] : "-"));
+            Check("H17-10 " + c.Name + ": the rules in the file are 1768b9e's rules", (string)Static("Rules", c.R) == c.Rules);
+            Check("H17-11 " + c.Name + ": no instruction or rule text on the command line", !start.Arguments.Contains("Quillfeather") && !start.Arguments.Contains("You are chatting in"));
+        }
+
+        // H17-12, 13: what the file holds
+        string withText = (string)Static("SystemPromptText", plain);
+        Check("H17-12 the file: preamble line, instructions, then the rules ending with DataRule",
+            withText == Const("InstructionsPreamble") + "\n\n" + Marker + "\n\n" + Const("StyleRule") + Const("NoRecallRule") + Const("DataRule"), Show(withText));
+        Check("H17-12 the preamble line is the plan's", Const("InstructionsPreamble") == "The user saved these standing instructions for new chats. Follow them unless they conflict with the rules that follow.");
+        Check("H17-13 without instructions the file is the rules only", (string)Static("SystemPromptText", reading) == (string)Static("Rules", reading));
+        Check("H17-13 empty instructions count as none", (string)Static("SystemPromptText", Request("")) == (string)Static("Rules", Request("")));
+
+        // H17-14: where the file goes, and its bytes
+        string written = (string)Static("WritePromptFile", plain);
+        string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
+        Check("H17-14 the file is in %TEMP%\\ClaudeAccountWidget-chat with a fresh name", Path.GetDirectoryName(written) == folder && Path.GetExtension(written) == ".txt"
+            && Path.GetFileNameWithoutExtension(written).Length == 32, written);
+        byte[] bytes = File.ReadAllBytes(written);
+        Check("H17-14 UTF-8 without a byte order mark, holding the text", bytes[0] == (byte)'T' && new UTF8Encoding(false).GetString(bytes) == withText);
+        string second = (string)Static("WritePromptFile", plain);
+        Check("H17-14 each request gets its own file", second != written && File.Exists(written) && File.Exists(second));
+
+        // H17-15: leftovers older than a day go when the next file is written; newer ones and other files stay
+        string old = Path.Combine(folder, "old.txt"), recent = Path.Combine(folder, "recent.txt"), other = Path.Combine(folder, "keep.log");
+        foreach (string f in new[] { old, recent, other }) File.WriteAllText(f, "x");
+        File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddDays(-2));
+        File.SetLastWriteTimeUtc(recent, DateTime.UtcNow.AddHours(-20));
+        File.SetLastWriteTimeUtc(other, DateTime.UtcNow.AddDays(-3));
+        string third = (string)Static("WritePromptFile", plain);
+        Check("H17-15 a file older than a day is removed", !File.Exists(old));
+        Check("H17-15 a newer file and a non-.txt file stay", File.Exists(recent) && File.Exists(other) && File.Exists(third));
+
+        // H17-16: the .cmd route wraps the whole command in quotes; the file path keeps its own quotes, with forward slashes
+        string spaced = Path.Combine(temp, "a b&c^d", "ClaudeAccountWidget-chat", "f.txt");
+        ProcessStartInfo cmd = (ProcessStartInfo)Static("BuildStart", Path.Combine(root, "npm dir", "claude.cmd"), plain, spaced);
+        string inner = "\"" + Path.Combine(root, "npm dir", "claude.cmd") + "\" ";
+        Check("H17-16 .cmd route: cmd /d /s /c with the command in outer quotes", cmd.Arguments.StartsWith("/d /s /c \"" + inner) && cmd.Arguments.EndsWith("\""), cmd.Arguments.Substring(0, Math.Min(120, cmd.Arguments.Length)));
+        Check("H17-16 .cmd route: the file path is quoted whole, with forward slashes", cmd.Arguments.Contains(" --append-system-prompt-file \"" + spaced.Replace('\\', '/') + "\" "));
+        Check("H17-16 the file path never ends in a backslash before its closing quote", !cmd.Arguments.Contains("\\\" "));
     }
 }

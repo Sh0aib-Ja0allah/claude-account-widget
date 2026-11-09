@@ -14,6 +14,14 @@ static class Fake
         StreamReader input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
         string first = input.ReadLine();
         if (log != null) File.AppendAllText(log, "ARGS " + Environment.CommandLine + "\nSTDIN " + first + "\n", new UTF8Encoding(false));
+        // The system prompt file, as Claude Code would read it: its path, and its text on one line with \n escaped.
+        string[] args = Environment.GetCommandLineArgs();
+        for (int i = 1; i + 1 < args.Length; i++)
+        {
+            if (args[i] != "--append-system-prompt-file") continue;
+            string text = File.Exists(args[i + 1]) ? File.ReadAllText(args[i + 1], new UTF8Encoding(false)) : "(missing)";
+            if (log != null) File.AppendAllText(log, "SYSPROMPTFILE " + args[i + 1] + "\nSYSPROMPT " + text.Replace("\\", "\\\\").Replace("\r", "\\r").Replace("\n", "\\n") + "\n", new UTF8Encoding(false));
+        }
         Stream output = Console.OpenStandardOutput();
         foreach (string line in File.ReadAllLines(script, new UTF8Encoding(false)))
         {
