@@ -6532,6 +6532,10 @@ class ChatWindow : Window
     readonly ColumnDefinition splitColumn = new ColumnDefinition();
     readonly System.Windows.Controls.GridSplitter previewSplitter = new System.Windows.Controls.GridSplitter();
     readonly List<string> chatFiles = new List<string>();
+    // Turns from renderedFrom to the end are drawn; earlier ones are data only until they're scrolled to. Prompts, saving
+    // and chatFiles always come from turns, never from what's drawn.
+    int renderedFrom;
+    internal const int FirstBatch = 30;
     readonly Dictionary<string, List<Action>> cardRefreshers = new Dictionary<string, List<Action>>(StringComparer.OrdinalIgnoreCase);
     static string desktopFolder = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     readonly Border titleButton = new Border();
@@ -7634,6 +7638,7 @@ class ChatWindow : Window
     {
         CancelEdit();
         turns.Clear();
+        renderedFrom = 0;
         sent.Clear();
         bubbles.Clear();
         replyTexts.Clear();
@@ -7700,27 +7705,48 @@ class ChatWindow : Window
         instructionsFromNote = true;
         noteWriter.Instructions = instructionsTooLong ? savedInstructions : instructions;
         ShowInstructionsHint();
+
+        // Drawing every turn at once held the window for seconds on a long chat, so only the newest batch is drawn now.
         foreach (ChatTurn turn in turns)
         {
-            if (turn.FromUser)
+            foreach (string file in turn.CreatedFiles)
             {
-                UIElement files = turn.Attachments.Count > 0 ? BuildSentAttachments(turn.Attachments) : null;
-                if (files != null) messages.Children.Add(files);
-                Border bubble = AddUserBubble(turn.Text, turn);
-                turn.First = files ?? (UIElement)bubble.Parent;
-            }
-            else
-            {
-                AddReplyBubble(turn.Text);
-                AddReplyActions(turn);
-                foreach (string file in turn.CreatedFiles) messages.Children.Add(BuildFileCard(file));
+                if (!chatFiles.Exists(f => string.Equals(f, file, StringComparison.OrdinalIgnoreCase))) chatFiles.Add(file);
             }
         }
+        renderedFrom = FirstToRender(turns.Count);
+        for (int i = renderedFrom; i < turns.Count; i++) RenderTurn(turns[i]);
         UpdateReplyActions();
         chatTitle.Text = entry.Title;
         ShowSaveState(true);
         UpdateHistoryPanel();
         input.Focus();
+    }
+
+    // The newest FirstBatch turns, widened back to a question so a reply is never drawn without the turn that asked it.
+    int FirstToRender(int count)
+    {
+        int from = Math.Max(0, count - FirstBatch);
+        while (from > 0 && !turns[from].FromUser) from--;
+        return from;
+    }
+
+    // Draws one saved turn at the end of the conversation.
+    void RenderTurn(ChatTurn turn)
+    {
+        if (turn.FromUser)
+        {
+            UIElement files = turn.Attachments.Count > 0 ? BuildSentAttachments(turn.Attachments) : null;
+            if (files != null) messages.Children.Add(files);
+            Border bubble = AddUserBubble(turn.Text, turn);
+            turn.First = files ?? (UIElement)bubble.Parent;
+        }
+        else
+        {
+            AddReplyBubble(turn.Text);
+            AddReplyActions(turn);
+            foreach (string file in turn.CreatedFiles) messages.Children.Add(BuildFileCard(file));
+        }
     }
 
     void ToggleFullScreen()

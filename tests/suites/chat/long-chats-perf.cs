@@ -237,12 +237,14 @@ static class HP
         Record("m5-first-layout", size, sw.Elapsed.TotalMilliseconds);
         Record("m4+m5-open-total", size, build + sw.Elapsed.TotalMilliseconds);
         StackPanel messages = (StackPanel)Get(chat, "messages");
-        int cards = ((List<ChatTurn>)Get(chat, "turns")).Sum(t => t.CreatedFiles.Count);
+        FieldInfo drawnFromField = typeof(ChatWindow).GetField("renderedFrom", Any);
+        int drawnFrom = drawnFromField == null ? 0 : (int)drawnFromField.GetValue(chat);
+        int cards = ((List<ChatTurn>)Get(chat, "turns")).Skip(drawnFrom).Sum(t => t.CreatedFiles.Count);
         for (int i = 0; i < 400 && LoadedThumbnails(messages) < cards; i++) await Task.Delay(25);
         fromOpen.Stop();
         Record("mf-thumbnails-ready", size, fromOpen.Elapsed.TotalMilliseconds);
         if (run == 0) Check("P-0f " + size + ": every created file's thumbnail loads (" + cards + " cards)", LoadedThumbnails(messages) >= cards, LoadedThumbnails(messages) + " of " + cards);
-        if (run == 0) Check("P-04 " + size + ": every turn is built when opening (the 0.2.1 behaviour)", ((List<ChatTurn>)Get(chat, "turns")).Count == turns.Count, messages.Children.Count + " elements");
+        if (run == 0) Check("P-04 " + size + ": every turn is read when opening", ((List<ChatTurn>)Get(chat, "turns")).Count == turns.Count, messages.Children.Count + " elements drawn");
         Record("elements", size, messages.Children.Count);
 
         // m6: memory after opening
@@ -291,6 +293,9 @@ static class HP
         }
         Record("m10-scroll-worst-step", size, worst);
         Record("m10-scroll-total", size, total);
+
+        scroller.ScrollToEnd();
+        Flush(chat);
 
         // m9: sending in a long chat, from the click until the user's bubble is laid out (L600 is over the request limit).
         // P-11 (m11): the same with claude's start held for 2 s, which must not hold up the window.
