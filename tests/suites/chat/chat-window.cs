@@ -1350,6 +1350,7 @@ static class H3
 
     static async Task Instructions()
     {
+        await Snapshots();
         const string Marker = "Always end with the word zebrafish";
         string savedTemp = Environment.GetEnvironmentVariable("TEMP"), savedTmp = Environment.GetEnvironmentVariable("TMP");
         // A temp folder with a space and cmd metacharacters, so the .cmd route's quoting is exercised.
@@ -1422,5 +1423,78 @@ static class H3
             Environment.SetEnvironmentVariable("TEMP", savedTemp);
             Environment.SetEnvironmentVariable("TMP", savedTmp);
         }
+    }
+
+    // ---------- saved instructions: which chats get them (H17-20 to 25) ----------
+    static string LastPrompt()
+    {
+        List<string> prompts = FakeLines("SYSPROMPT ");
+        return prompts.Count > 0 ? Unescape(prompts.Last()) : "";
+    }
+    static void SaveInstructions(string text)
+    {
+        string file = Path.Combine(data, ChatInstructions.FileName);
+        if (text == null) { if (File.Exists(file)) File.Delete(file); }
+        else File.WriteAllText(file, text, new UTF8Encoding(false));
+    }
+    static string Preamble() { return (string)typeof(ChatClient).GetField("InstructionsPreamble", Any).GetValue(null); }
+
+    static async Task Snapshots()
+    {
+        SaveInstructions("Mention a heron in every answer.");
+        ChatWindow w = NewWindow();
+        await Task.Delay(200);
+        await Exchange(w, "first", "one");
+        Check("H17-20 a new chat sends the saved instructions", LastPrompt().StartsWith(Preamble() + "\n\nMention a heron in every answer.\n\n"), LastPrompt().Length.ToString());
+
+        SaveInstructions("Mention an otter in every answer.");
+        await Exchange(w, "second", "two");
+        Check("H17-22 an open chat keeps what it started with", LastPrompt().Contains("heron") && !LastPrompt().Contains("otter"));
+
+        Call(w, "StartNewChat");
+        await Exchange(w, "third", "three");
+        Check("H17-21 New chat in the same window takes the new text", LastPrompt().Contains("otter") && !LastPrompt().Contains("heron"));
+        await Exchange(w, "fourth", "four");
+
+        SaveInstructions("Mention a kestrel in every answer.");
+        ReplyScript("four again");
+        Press(w, Replies(w).Last().Regenerate, Key.Enter);
+        await Idle(w);
+        Check("H17-25 regenerate sends the chat's own instructions", Replies(w).Last().Text == "four again" && LastPrompt().Contains("otter") && !LastPrompt().Contains("kestrel"));
+        Call(w, "StartEdit", Turns(w)[0]);
+        ReplyScript("edited answer");
+        await SendNow(w, "third, edited");
+        Check("H17-25 an edit sends the chat's own instructions", Turns(w)[0].Text == "third, edited" && LastPrompt().Contains("otter") && !LastPrompt().Contains("kestrel"));
+
+        string otterNote = NotePath(w);
+        Check("H17-23 the note records the chat's instructions", otterNote != null && File.ReadAllText(otterNote).Contains("## Saved instructions") && File.ReadAllText(otterNote).Contains("  Mention an otter in every answer."));
+        w.Close();
+        ChatWindow o = NewWindow();
+        await Task.Delay(200);
+        Call(o, "OpenSavedChat", new ChatEntry { Path = otterNote, Title = "otter", Started = DateTime.Now, Text = "" });
+        await Exchange(o, "after reopening", "five");
+        Check("H17-23 a reopened chat uses the instructions its note recorded, not today's", LastPrompt().Contains("otter") && !LastPrompt().Contains("kestrel"));
+        Check("H17-23 and its note still records them", File.ReadAllText(otterNote).Contains("  Mention an otter in every answer."));
+
+        string oldNote = Path.Combine(hist, "old-style.md");
+        File.WriteAllText(oldNote, "---\ndate: 2026-10-01\ntype: claude-chat\ntags:\n  - claude-chat\nstarted: 2026-10-01T10:00:00\n---\n\n## For future Claude\n\nOld.\n\n## Conversation\n\n### You\n\n````text\nHello\n````\n\n### Claude\n\n````text\nHi\n````\n\n");
+        Call(o, "OpenSavedChat", new ChatEntry { Path = oldNote, Title = "old", Started = DateTime.Now, Text = "" });
+        await Exchange(o, "continuing an old chat", "six");
+        Check("H17-24 a chat saved before 0.3.0 continues with no instructions", !LastPrompt().Contains(Preamble()) && !LastPrompt().Contains("kestrel"));
+        Check("H17-24 and its note gains no section", !File.ReadAllText(oldNote).Contains("## Saved instructions"));
+        o.Close();
+
+        SaveInstructions(new string('x', ChatInstructions.Limit + 1));
+        ChatWindow tooLong = NewWindow();
+        await Task.Delay(200);
+        await Exchange(tooLong, "with a file over the limit", "seven");
+        Check("H17-20 a file over the limit isn't sent", !LastPrompt().Contains(Preamble()) && (bool)Get(tooLong, "instructionsTooLong"));
+        tooLong.Close();
+        SaveInstructions(null);
+        ChatWindow none = NewWindow();
+        await Task.Delay(200);
+        await Exchange(none, "without a file", "eight");
+        Check("H17-20 no file: the rules only", !LastPrompt().Contains(Preamble()) && !(bool)Get(none, "instructionsTooLong"));
+        none.Close();
     }
 }

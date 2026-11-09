@@ -4759,6 +4759,9 @@ class ChatNoteWriter
     // A name the user gave this chat. Without one, the list uses the first message.
     public string Title;
 
+    // The saved instructions this chat started with, or null. Recorded in the note so a reopened chat keeps them.
+    public string Instructions;
+
     public ChatNoteWriter(string historyFolder)
     {
         folder = historyFolder;
@@ -4791,9 +4794,17 @@ class ChatNoteWriter
 
     public static bool TryRead(string path, out List<ChatTurn> turns, out DateTime noteStart, out string title)
     {
+        string ignored;
+        return TryRead(path, out turns, out noteStart, out title, out ignored);
+    }
+
+    // The instructions come back separately: they're never a turn, so they're never in search text either.
+    public static bool TryRead(string path, out List<ChatTurn> turns, out DateTime noteStart, out string title, out string instructions)
+    {
         turns = new List<ChatTurn>();
         noteStart = DateTime.Now;
         title = null;
+        instructions = null;
         try
         {
             string[] lines = File.ReadAllText(path).Replace("\r\n", "\n").Split('\n');
@@ -4811,6 +4822,7 @@ class ChatNoteWriter
                 }
             }
             if (!isChat) return false;
+            instructions = ReadInstructions(lines, line);
 
             for (; line < lines.Length; line++)
             {
@@ -4868,6 +4880,46 @@ class ChatNoteWriter
         catch (UnauthorizedAccessException) { return false; }
     }
 
+    // The "## Saved instructions" section, looked for only before the conversation starts. Every line in its block is
+    // indented by two spaces, so none can pass for a speaker heading or close the fence, in this reader or an older one.
+    static string ReadInstructions(string[] lines, int from)
+    {
+        for (int line = from; line < lines.Length; line++)
+        {
+            if (lines[line] == "## Conversation" || lines[line] == "### You" || lines[line].StartsWith("### Claude")) return null;
+            if (lines[line] != "## Saved instructions") continue;
+            int open = line + 1;
+            while (open < lines.Length && !Regex.IsMatch(lines[open], "^`{4,}text$"))
+            {
+                if (lines[open].StartsWith("#")) return null;
+                open++;
+            }
+            if (open >= lines.Length) return null;
+            string fence = lines[open].Substring(0, lines[open].Length - 4);
+            List<string> kept = new List<string>();
+            for (int inside = open + 1; inside < lines.Length; inside++)
+            {
+                if (lines[inside] == fence)
+                {
+                    string text = string.Join("\n", kept.ToArray()).Trim();
+                    return text.Length > 0 ? text : null;
+                }
+                kept.Add(lines[inside].StartsWith("  ") ? lines[inside].Substring(2) : lines[inside].TrimStart(' '));
+            }
+            return null;
+        }
+        return null;
+    }
+
+    static void AppendInstructions(StringBuilder note, string text)
+    {
+        note.Append("## Saved instructions\n\n");
+        note.Append("The user's saved instructions for new chats, as this chat started with them.\n\n");
+        note.Append("````text\n");
+        foreach (string line in text.Replace("\r\n", "\n").Split('\n')) note.Append("  ").Append(line).Append('\n');
+        note.Append("````\n\n");
+    }
+
     // Each message sits in a code block with a longer fence than any backtick run it contains,
     // so it can't break the frontmatter, fake a speaker or create links and tags in the vault.
     static void AppendMessage(StringBuilder note, string speaker, ChatTurn turn)
@@ -4916,6 +4968,7 @@ class ChatNoteWriter
         note.Append("## For future Claude\n\n");
         note.Append("This is a saved chat from the Claude Account Widget, started on ");
         note.Append(started.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).Append(".\n\n");
+        if (!string.IsNullOrEmpty(Instructions)) AppendInstructions(note, Instructions);
         note.Append("## Conversation\n\n");
         foreach (ChatTurn turn in turns)
         {
@@ -6442,8 +6495,21 @@ class ChatWindow : Window
     readonly DispatcherTimer liveTimer = new DispatcherTimer();
     readonly Dictionary<Border, string> replyTexts = new Dictionary<Border, string>();
 
+    // The saved instructions this chat started with (null for none), taken when it starts and kept for every send,
+    // edit and regenerate. instructionsTooLong is set when the saved file was over the limit and so isn't used.
+    readonly string settingsFolder;
+    string instructions;
+    bool instructionsTooLong;
+
+    void TakeInstructions()
+    {
+        instructions = ChatInstructions.Read(settingsFolder, out instructionsTooLong);
+        if (noteWriter != null) noteWriter.Instructions = instructions;
+    }
+
     public ChatWindow(string dataFolder)
     {
+        settingsFolder = dataFolder;
         historyFolder = ReadHistoryFolder(dataFolder);
         laptopAccess = ReadLaptopAccess(dataFolder);
         readFolders = ReadExtraFolders(dataFolder);
@@ -6453,6 +6519,7 @@ class ChatWindow : Window
         LoadOptions();
         LoadModelVersions();
         if (historyFolder != null) noteWriter = new ChatNoteWriter(historyFolder);
+        TakeInstructions();
 
         Title = "New chat";
         Width = 441;
@@ -7476,6 +7543,7 @@ class ChatWindow : Window
         }
         ClearConversation();
         if (historyFolder != null) noteWriter = new ChatNoteWriter(historyFolder);
+        TakeInstructions();
         chatTitle.Text = "New chat";
         ShowSaveState(true);
         UpdateHistoryPanel();
@@ -7502,7 +7570,8 @@ class ChatWindow : Window
         List<ChatTurn> saved;
         DateTime started;
         string customTitle;
-        if (!ChatNoteWriter.TryRead(entry.Path, out saved, out started, out customTitle))
+        string savedInstructions;
+        if (!ChatNoteWriter.TryRead(entry.Path, out saved, out started, out customTitle, out savedInstructions))
         {
             ShowStatus("Couldn't open this chat.", true, false);
             return;
@@ -7512,6 +7581,10 @@ class ChatWindow : Window
         turns.AddRange(saved);
         noteWriter = new ChatNoteWriter(historyFolder, entry.Path, started);
         noteWriter.Title = customTitle;
+        // A reopened chat continues with the instructions its note recorded; one saved without any has none.
+        instructions = savedInstructions;
+        instructionsTooLong = false;
+        noteWriter.Instructions = instructions;
         foreach (ChatTurn turn in turns)
         {
             if (turn.FromUser)
@@ -9028,6 +9101,7 @@ class ChatWindow : Window
         request.Effort = effortChoice;
         request.Links = LinksIn(message);
         request.ReadFolders = readFolders;
+        request.Instructions = instructions;
         request.DefaultOutputFolder = Path.Combine(desktopFolder, "Claude");
         request.CurrentOutputFolder = ReadOutputFolder;
         request.ResolveOutputFolder = ResolveOutputFolder;

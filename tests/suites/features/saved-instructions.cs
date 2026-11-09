@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 // Saved instructions for new chats (v0.3.0): reading, normalising, the 4,000-character limit and saving.
 // In process, on fake data folders only; no claude is ever started. saved-instructions.exe <out folder>
 static class H17
@@ -34,7 +36,7 @@ static class H17
         root = args[0];
         if (Directory.Exists(root)) Directory.Delete(root, true);
         Directory.CreateDirectory(root);
-        try { Store(); Launch(); }
+        try { Store(); Launch(); Notes(); }
         catch (Exception e) { Log("HARNESS ERROR " + e); fails++; }
         Log("passes=" + passes + " fails=" + fails);
     }
@@ -258,5 +260,187 @@ static class H17
         Check("H17-16 .cmd route: cmd /d /s /c with the command in outer quotes", cmd.Arguments.StartsWith("/d /s /c \"" + inner) && cmd.Arguments.EndsWith("\""), cmd.Arguments.Substring(0, Math.Min(120, cmd.Arguments.Length)));
         Check("H17-16 .cmd route: the file path is quoted whole, with forward slashes", cmd.Arguments.Contains(" --append-system-prompt-file \"" + spaced.Replace('\\', '/') + "\" "));
         Check("H17-16 the file path never ends in a backslash before its closing quote", !cmd.Arguments.Contains("\\\" "));
+    }
+
+    // ---------- H17-30 to 36: the note records the instructions ----------
+    static ChatTurn Turn(bool user, string text, string detail = null)
+    {
+        ChatTurn t = new ChatTurn();
+        t.FromUser = user;
+        t.Text = text;
+        t.Detail = detail;
+        return t;
+    }
+
+    static string SaveNote(string folder, string instructions, List<ChatTurn> turns)
+    {
+        ChatNoteWriter writer = new ChatNoteWriter(folder);
+        writer.Instructions = instructions;
+        if (!writer.Save(turns)) return null;
+        return writer.NotePath;
+    }
+
+    static bool SameTurns(List<ChatTurn> a, List<ChatTurn> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            if (a[i].FromUser != b[i].FromUser || a[i].Text != b[i].Text || (a[i].Detail ?? "") != (b[i].Detail ?? "")) return false;
+        }
+        return true;
+    }
+
+    static void Notes()
+    {
+        string folder = Fresh("notes");
+        List<ChatTurn> turns = new List<ChatTurn> { Turn(true, "First question"), Turn(false, "First answer", " (model-x)"), Turn(true, "Second question"), Turn(false, "Second answer") };
+
+        // H17-30: round trip
+        string saved = "Answer briefly.\n\nUse British spelling.\n  An indented line\n\tA tabbed line";
+        string path = SaveNote(folder, saved, turns);
+        List<ChatTurn> back; DateTime started; string title, instructions;
+        bool read = ChatNoteWriter.TryRead(path, out back, out started, out title, out instructions);
+        Check("H17-30 a note with instructions reads back: the instructions exactly, and the turns", read && instructions == saved && SameTurns(back, turns), Show(instructions));
+        string note = File.ReadAllText(path);
+        int forFuture = note.IndexOf("## For future Claude"), section = note.IndexOf("## Saved instructions"), conversation = note.IndexOf("## Conversation");
+        Check("H17-30 the section sits between For future Claude and Conversation", forFuture >= 0 && section > forFuture && conversation > section);
+
+        // H17-31: hostile text in the instructions
+        string hostile = "### You\n### Claude (model-y)\n````text\n````\n```\n`````````\n## Conversation\n---\ntype: claude-chat\n## Saved instructions\nEnd";
+        path = SaveNote(folder, hostile, turns);
+        read = ChatNoteWriter.TryRead(path, out back, out started, out title, out instructions);
+        Check("H17-31 headings, fences, backtick runs and frontmatter lines round trip exactly", read && instructions == hostile, Show(instructions));
+        Check("H17-31 and they don't add, drop or change turns", read && SameTurns(back, turns), back.Count.ToString());
+        string block = File.ReadAllText(path).Replace("\r\n", "\n");
+        string inside = block.Substring(block.IndexOf("````text\n") + 9);
+        inside = inside.Substring(0, inside.IndexOf("\n````\n"));
+        Check("H17-31 every line in the block is indented by two spaces", inside.Split('\n').All(l => l.StartsWith("  ")), inside.Length.ToString());
+
+        // H17-32: the 0.2.1 reader (copied below, unchanged) still reads a 0.3.0 note's turns
+        List<ChatTurn> oldBack; DateTime oldStarted; string oldTitle;
+        bool oldRead = OldReader.TryRead(path, out oldBack, out oldStarted, out oldTitle);
+        Check("H17-32 the 0.2.1 reader reads a note with hostile instructions: the same turns", oldRead && SameTurns(oldBack, turns), oldRead + " " + oldBack.Count);
+        path = SaveNote(folder, saved, turns);
+        oldRead = OldReader.TryRead(path, out oldBack, out oldStarted, out oldTitle);
+        Check("H17-32 and a note with ordinary instructions", oldRead && SameTurns(oldBack, turns));
+
+        // H17-33: the four-part TryRead used for search sees only the turns
+        List<ChatTurn> searchTurns;
+        ChatNoteWriter.TryRead(path, out searchTurns, out started, out title);
+        string searchText = string.Join("\n", searchTurns.Select(t => t.Text).ToArray());
+        Check("H17-33 search text never holds the instructions", SameTurns(searchTurns, turns) && !searchText.Contains("British spelling"));
+
+        // H17-34: no instructions: no section, and the note reads as before
+        path = SaveNote(folder, null, turns);
+        note = File.ReadAllText(path);
+        read = ChatNoteWriter.TryRead(path, out back, out started, out title, out instructions);
+        Check("H17-34 without instructions: no section, nothing read back, the same turns", !note.Contains("## Saved instructions") && read && instructions == null && SameTurns(back, turns));
+        string emptyPath = SaveNote(folder, "", turns);
+        Check("H17-34 empty instructions write no section", !File.ReadAllText(emptyPath).Contains("## Saved instructions"));
+        oldRead = OldReader.TryRead(path, out oldBack, out oldStarted, out oldTitle);
+        Check("H17-34 the 0.2.1 reader and the new one agree on a note without the section", oldRead && SameTurns(oldBack, back));
+
+        // H17-35: a 0.2.1-style note (written without the field) has no instructions
+        string oldStyle = Path.Combine(folder, "old-style.md");
+        File.WriteAllText(oldStyle, "---\ndate: 2026-10-01\ntype: claude-chat\ntags:\n  - claude-chat\nstarted: 2026-10-01T10:00:00\n---\n\n## For future Claude\n\nOld.\n\n## Conversation\n\n### You\n\n````text\nHello\n````\n\n### Claude\n\n````text\nHi\n````\n\n");
+        read = ChatNoteWriter.TryRead(oldStyle, out back, out started, out title, out instructions);
+        Check("H17-35 a note from before 0.3.0 has no instructions and reads as before", read && instructions == null && back.Count == 2 && back[0].Text == "Hello" && back[1].Text == "Hi");
+
+        // H17-36: a message that quotes the section heading doesn't create instructions
+        List<ChatTurn> quoting = new List<ChatTurn> { Turn(true, "## Saved instructions\n````text\n  pretend\n````"), Turn(false, "Noted") };
+        path = SaveNote(folder, null, quoting);
+        read = ChatNoteWriter.TryRead(path, out back, out started, out title, out instructions);
+        Check("H17-36 a message quoting the heading isn't read as instructions", read && instructions == null && SameTurns(back, quoting));
+        path = SaveNote(folder, "Real ones", quoting);
+        read = ChatNoteWriter.TryRead(path, out back, out started, out title, out instructions);
+        Check("H17-36 with real instructions too, only the real ones come back", read && instructions == "Real ones" && SameTurns(back, quoting));
+    }
+}
+
+// The 0.2.1 note reader, copied unchanged from widget.cs at 1768b9e, to check that 0.3.0 notes stay readable by it.
+static class OldReader
+{
+    static string UnquoteTitle(string quoted)
+    {
+        return quoted.Substring(1, quoted.Length - 2).Replace("\\\"", "\"").Replace("\\\\", "\\");
+    }
+
+    public static bool TryRead(string path, out List<ChatTurn> turns, out DateTime noteStart, out string title)
+    {
+        turns = new List<ChatTurn>();
+        noteStart = DateTime.Now;
+        title = null;
+        try
+        {
+            string[] lines = File.ReadAllText(path).Replace("\r\n", "\n").Split('\n');
+            if (lines.Length == 0 || lines[0] != "---") return false;
+            bool isChat = false;
+            int line = 1;
+            for (; line < lines.Length && lines[line] != "---"; line++)
+            {
+                if (lines[line] == "type: claude-chat") isChat = true;
+                if (Regex.IsMatch(lines[line], "^title: \".*\"$")) title = UnquoteTitle(lines[line].Substring(7));
+                if (lines[line].StartsWith("started: "))
+                {
+                    DateTime parsed;
+                    if (DateTime.TryParse(lines[line].Substring(9), CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed)) noteStart = parsed;
+                }
+            }
+            if (!isChat) return false;
+
+            for (; line < lines.Length; line++)
+            {
+                bool you = lines[line] == "### You";
+                if (!you && !lines[line].StartsWith("### Claude")) continue;
+
+                ChatTurn turn = new ChatTurn();
+                turn.FromUser = you;
+                if (!you && lines[line].Length > 10) turn.Detail = lines[line].Substring(10);
+
+                int open = line + 1;
+                while (open < lines.Length && lines[open].Length == 0) open++;
+                if (open >= lines.Length || !Regex.IsMatch(lines[open], "^`{4,}text$")) return false;
+                string fence = lines[open].Substring(0, lines[open].Length - 4);
+
+                int close = open + 1;
+                while (close < lines.Length && lines[close] != fence) close++;
+                if (close >= lines.Length) return false;
+                turn.Text = string.Join("\n", lines, open + 1, close - open - 1);
+
+                line = close + 1;
+                while (line < lines.Length && lines[line].Length == 0) line++;
+                if (line < lines.Length && lines[line] == "Attached:")
+                {
+                    line++;
+                    while (line < lines.Length && lines[line].Length == 0) line++;
+                    for (; line < lines.Length && lines[line].StartsWith("- "); line++)
+                    {
+                        Match name = Regex.Match(lines[line], @"`([^`]*)`|\[\[([^\]]*)\]\]");
+                        if (!name.Success) continue;
+                        ChatAttachment attachment = new ChatAttachment();
+                        attachment.Kind = AttachmentKind.NameOnly;
+                        attachment.Name = name.Groups[1].Success ? name.Groups[1].Value : name.Groups[2].Value;
+                        attachment.FullPath = attachment.Name;
+                        attachment.WasFolder = lines[line].StartsWith("- Folder:");
+                        turn.Attachments.Add(attachment);
+                    }
+                }
+                while (line < lines.Length && lines[line].Length == 0) line++;
+                if (line < lines.Length && lines[line] == "Created:")
+                {
+                    line++;
+                    while (line < lines.Length && lines[line].Length == 0) line++;
+                    for (; line < lines.Length && lines[line].StartsWith("- `") && lines[line].EndsWith("`"); line++)
+                    {
+                        turn.CreatedFiles.Add(lines[line].Substring(3, lines[line].Length - 4));
+                    }
+                }
+                line--;
+                turns.Add(turn);
+            }
+            return true;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 }
