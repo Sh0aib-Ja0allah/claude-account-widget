@@ -143,7 +143,7 @@ function Build-App {
 
 function Run-Quick {
     Invoke-Suite 'lint' "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $tests 'lint.ps1'), '-Root', $tests) -NoSummary
-    $quick = [ordered]@{ 'settings-window' = 'H6'; 'usage-alerts' = 'H7'; 'limit-forecast' = 'H8'; 'history-recording' = 'H9'; 'history-chart' = 'H10'; 'chat-shortcut' = 'H11'; 'update-notice' = 'H12'; 'account-profile' = 'H14'; 'account-tiers' = 'H15'; 'sidebar-account' = 'H16'; 'saved-instructions' = 'H17'; 'long-chats' = 'H18' }
+    $quick = [ordered]@{ 'settings-window' = 'H6'; 'usage-alerts' = 'H7'; 'limit-forecast' = 'H8'; 'history-recording' = 'H9'; 'history-chart' = 'H10'; 'chat-shortcut' = 'H11'; 'update-notice' = 'H12'; 'account-profile' = 'H14'; 'account-tiers' = 'H15'; 'sidebar-account' = 'H16'; 'saved-instructions' = 'H17'; 'long-chats' = 'H18'; 'sign-in-guard' = 'H19' }
     foreach ($n in $quick.Keys) { Invoke-Feature $n $quick[$n] @((Join-Path $out "$n\run")) }
 }
 

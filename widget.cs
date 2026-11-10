@@ -3886,6 +3886,578 @@ class ChatResult
     }
 }
 
+// The sign-in guard's three answers, worst last. Unresolved is a path it couldn't map to a local file: never safe.
+enum GuardResult { Clear, Unresolved, SignIn }
+
+// Claude Code's sign-in files are refused to a chat: ~/.claude/.credentials.json, ~/.claude.json and every copy of it
+// (~/.claude.json.backup, ~/.claude.json.tmp.*), and everything under ~/.claude/backups. A path is checked by name, then
+// by the identity of the file it opens on disk, so short names, links, junctions, \\?\ and GLOBALROOT forms and
+// streams all lead to the same answer. Only local-disk paths are ever opened: a network path, a pipe or a device is
+// never touched, because opening it could send the user's Windows credentials to another computer or talk to a program.
+// Anything it can't resolve is Unresolved, never Clear.
+// This is best effort, not a lock. The path is checked a moment before the tool opens it, so a link swapped in between
+// gets past it; that needs a command or script, and those can read any file without naming it anyway. Commands are
+// checked by pattern, which can't be complete.
+static class SignInGuard
+{
+    const uint FileReadAttributes = 0x80;
+    const uint ShareAll = 0x7;
+    const uint OpenExisting = 3;
+    const uint BackupSemantics = 0x02000000;
+    const uint DirectoryAttribute = 0x10;
+    const int MaxPath = 260;
+
+    // BY_HANDLE_FILE_INFORMATION: thirteen 4-byte fields, 52 bytes. The FILETIMEs are uint pairs, so nothing is padded
+    // (with longs the struct was 56 bytes and every field after Attributes read 4 bytes off).
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    internal struct FileInfo
+    {
+        public uint Attributes;
+        public uint CreatedLow, CreatedHigh, AccessedLow, AccessedHigh, WrittenLow, WrittenHigh;
+        public uint VolumeSerial;
+        public uint SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint mode, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandle(IntPtr handle, out FileInfo info);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint size, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint QueryDosDeviceW(string device, StringBuilder target, int size);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern uint GetDriveTypeW(string root);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern uint GetFullPathNameW(string path, uint size, StringBuilder full, out IntPtr filePart);
+
+    // Tests point this at a scratch folder instead of the real profile.
+    internal static string HomeOverride;
+    // Tests: OpenLogForTests sees every path the guard hands to a Win32 file API, and DosDeviceForTests stands in for
+    // QueryDosDeviceW (a drive letter to its target, or null for none), so no real subst or share is needed.
+    internal static Action<string> OpenLogForTests;
+    internal static Func<char, string> DosDeviceForTests;
+
+    static string Home
+    {
+        get { return HomeOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile); }
+    }
+
+    static readonly Regex CommandPattern = new Regex(
+        @"credential|\.cred|claude\.json|oauthaccount|claude\s+(auth|login|logout|setup-token)|(^|[\\/""'\s~=])\.claude([\\/""'\s*?]|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    static readonly Regex HomeVariable = new Regex(@"\$\{HOME\}|\$HOME\b|\$env:(USERPROFILE|HOME)\b|%USERPROFILE%|%HOME%",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    static readonly Regex PathLike = new Regex(@"^\s*[""']?([A-Za-z]:[\\/]|[\\/]{2}|~([\\/]|$)|\$\{?HOME\b|\$env:|%[A-Za-z_]+%|file:)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    // Win32 opens these names as devices in any folder and with any extension.
+    static readonly Regex DeviceName = new Regex(@"^(CON|PRN|AUX|NUL|COM[0-9\u00b9\u00b2\u00b3]|LPT[0-9\u00b9\u00b2\u00b3]|CONIN\$|CONOUT\$)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    static readonly string[] TargetNames = { ".claude", ".claude.json", ".claude.json.backup", ".claude.json.tmp.1.a", ".credentials.json" };
+
+    class Opened
+    {
+        public string Id;
+        public string Final;
+        public bool Directory;
+    }
+
+    class Targets
+    {
+        public HashSet<string> Ids = new HashSet<string>();
+        public List<string> Finals = new List<string>();
+    }
+
+    // The sign-in files as they are now. Copies appear and go, so this is listed again for every check.
+    internal static List<string> TargetFiles()
+    {
+        string home = Home;
+        if (OpenLogForTests != null) OpenLogForTests(home);
+        List<string> files = new List<string> { Path.Combine(home, ".claude", ".credentials.json"), Path.Combine(home, ".claude.json") };
+        try
+        {
+            foreach (string f in Directory.GetFiles(home, ".claude.json*"))
+            {
+                if (!files.Contains(f)) files.Add(f);
+            }
+            string backups = Path.Combine(home, ".claude", "backups");
+            if (OpenLogForTests != null) OpenLogForTests(backups);
+            if (Directory.Exists(backups)) files.AddRange(Directory.GetFiles(backups, "*", SearchOption.AllDirectories));
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return files;
+    }
+
+    static Targets CurrentTargets()
+    {
+        Targets t = new Targets();
+        foreach (string file in TargetFiles())
+        {
+            int error;
+            Opened o = LocalDisk(file) ? Open(file, out error) : null;
+            if (o == null) continue;
+            t.Ids.Add(o.Id);
+            if (o.Final != null) t.Finals.Add(o.Final);
+        }
+        return t;
+    }
+
+    // Whether this tool call would read or change a sign-in file (SignIn), couldn't be checked (Unresolved), or is Clear.
+    // Every string field is checked. Path fields get the full check; other fields that look like a path can only refuse.
+    // A search's root (its path, or the working folder) is refused when a sign-in file is anywhere under it.
+    internal static GuardResult Check(string tool, Dictionary<string, object> input, string workingFolder)
+    {
+        if (input == null) return GuardResult.Clear;
+        Targets targets = null;
+        GuardResult worst = Walk(tool ?? "", "", input, workingFolder, ref targets, 0);
+        bool search = tool == "Grep" || tool == "Glob";
+        if (search && worst != GuardResult.SignIn)
+        {
+            object p;
+            string given = input.TryGetValue("path", out p) ? p as string : null;
+            if (string.IsNullOrEmpty(given) || given.Trim().Length == 0)
+            {
+                worst = Max(worst, workingFolder == null ? GuardResult.Unresolved : PathCheck(workingFolder, workingFolder, true, ref targets));
+            }
+        }
+        return worst;
+    }
+
+    static GuardResult Max(GuardResult a, GuardResult b)
+    {
+        return (int)a >= (int)b ? a : b;
+    }
+
+    static GuardResult Walk(string tool, string key, object value, string workingFolder, ref Targets targets, int depth)
+    {
+        if (value == null || depth > 6) return GuardResult.Clear;
+        string text = value as string;
+        if (text != null) return Field(tool, key, text, workingFolder, ref targets);
+        GuardResult worst = GuardResult.Clear;
+        System.Collections.IDictionary map = value as System.Collections.IDictionary;
+        if (map != null)
+        {
+            foreach (System.Collections.DictionaryEntry e in map)
+            {
+                worst = Max(worst, Walk(tool, Convert.ToString(e.Key, CultureInfo.InvariantCulture), e.Value, workingFolder, ref targets, depth + 1));
+                if (worst == GuardResult.SignIn) return worst;
+            }
+            return worst;
+        }
+        System.Collections.IEnumerable list = value as System.Collections.IEnumerable;
+        if (list != null)
+        {
+            foreach (object item in list)
+            {
+                worst = Max(worst, Walk(tool, key, item, workingFolder, ref targets, depth + 1));
+                if (worst == GuardResult.SignIn) return worst;
+            }
+        }
+        return worst;
+    }
+
+    static GuardResult Field(string tool, string key, string value, string workingFolder, ref Targets targets)
+    {
+        if (tool == "Bash" || tool == "PowerShell")
+        {
+            // The description is only shown, never run.
+            return key != "description" && CommandNamesTarget(value) ? GuardResult.SignIn : GuardResult.Clear;
+        }
+        bool search = tool == "Grep" || tool == "Glob";
+        if (value.Trim().Length == 0) return GuardResult.Clear;
+        if (key == "file_path" || key == "path" || key == "notebook_path") return PathCheck(value, workingFolder, search && key == "path", ref targets);
+        if (value.IndexOf('\n') >= 0 || value.IndexOf('\r') >= 0 || !PathLike.IsMatch(value)) return GuardResult.Clear;
+        if (tool == "Glob" && key == "pattern")
+        {
+            // An absolute pattern searches from its first wildcard's folder.
+            string prefix = value.Trim();
+            int wild = prefix.IndexOfAny(new[] { '*', '?', '[', '{' });
+            if (wild >= 0)
+            {
+                int cut = Math.Max(prefix.LastIndexOf('/', wild), prefix.LastIndexOf('\\', wild));
+                prefix = cut >= 0 ? prefix.Substring(0, cut + 1) : "";
+            }
+            if (prefix.Length > 0) return PathCheck(prefix, workingFolder, true, ref targets);
+        }
+        return PathCheck(value, workingFolder, false, ref targets) == GuardResult.SignIn ? GuardResult.SignIn : GuardResult.Clear;
+    }
+
+    static GuardResult PathCheck(string raw, string workingFolder, bool search, ref Targets targets)
+    {
+        GuardResult worst = GuardResult.Clear;
+        foreach (string candidate in Candidates(raw, workingFolder))
+        {
+            worst = Max(worst, Resolve(candidate, search, ref targets));
+            if (worst == GuardResult.SignIn) break;
+        }
+        return worst;
+    }
+
+    // The full paths a raw string could mean, after ~, $HOME, %VARIABLE% and file: are expanded. A null entry means
+    // it can't be told (a drive-relative path, or a relative one with no working folder). /c/... and /mnt/c/... are
+    // also read as C:\..., and //c/... as both that and a network path.
+    internal static List<string> Candidates(string raw, string workingFolder)
+    {
+        List<string> list = new List<string>();
+        string path = raw.Trim();
+        if (path.Length >= 2 && (path[0] == '"' || path[0] == '\'') && path[path.Length - 1] == path[0]) path = path.Substring(1, path.Length - 2).Trim();
+        if (path.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+        {
+            Uri uri;
+            if (!Uri.TryCreate(path, UriKind.Absolute, out uri) || !uri.IsFile) { list.Add(null); return list; }
+            path = uri.LocalPath;
+        }
+        path = path.Replace('/', '\\');
+        if (path == "~" || path.StartsWith("~\\")) path = Home + path.Substring(1);
+        path = HomeVariable.Replace(path, Home.Replace("$", "$$"));
+        path = Environment.ExpandEnvironmentVariables(path);
+        Match posix = Regex.Match(path, @"^(?:\\mnt\\|\\\\|\\)([A-Za-z])(?:\\|$)");
+        if (posix.Success) list.Add(posix.Groups[1].Value + ":\\" + path.Substring(posix.Length));
+        list.Add(Absolute(path, workingFolder));
+        return list;
+    }
+
+    static string Absolute(string path, string workingFolder)
+    {
+        if (path.StartsWith(@"\\")) return path;
+        if (Regex.IsMatch(path, @"^[A-Za-z]:\\")) return path;
+        if (Regex.IsMatch(path, @"^[A-Za-z]:")) return null;
+        if (workingFolder == null || !Regex.IsMatch(workingFolder, @"^[A-Za-z]:\\")) return null;
+        if (path.StartsWith("\\")) return workingFolder.Substring(0, 2) + path;
+        return workingFolder.TrimEnd('\\') + "\\" + path;
+    }
+
+    // The length of a path's root, such as C:\ or \\?\Volume{...}\, or 0 when the form isn't known.
+    static int RootLength(string path)
+    {
+        Match m = Regex.Match(path, @"^([A-Za-z]:\\|\\\\[?.]\\[A-Za-z]:\\|\\\\[?.]\\Volume\{[0-9A-Fa-f-]{36}\}\\|\\\\[?.]\\GLOBALROOT\\Device\\HarddiskVolume[0-9]+\\)", RegexOptions.IgnoreCase);
+        if (m.Success) return m.Length;
+        m = Regex.Match(path, @"^\\\\[^\\]+\\[^\\]+(\\|$)");
+        return m.Success ? m.Length : 0;
+    }
+
+    // The full path Win32 itself would open, from GetFullPathNameW, which works on the string alone. It treats only \\.\
+    // as the root of a device path, so .. can climb out of C: or Volume{...} there; the guard has to judge that same
+    // path. A \\?\ path is used as written, but one with a . or .. segment is null (Node and Win32 read those
+    // differently), and so is a \\.\ path with one. Null means it can't be told.
+    internal static string Lexical(string path)
+    {
+        if (path.StartsWith(@"\\?\")) return DotSegment(path.Substring(4)) ? null : path;
+        if (path.StartsWith(@"\\.\") && DotSegment(path.Substring(4))) return null;
+        StringBuilder full = new StringBuilder(1024);
+        IntPtr filePart;
+        uint length = GetFullPathNameW(path, (uint)full.Capacity, full, out filePart);
+        if (length >= full.Capacity)
+        {
+            full = new StringBuilder((int)length + 1);
+            length = GetFullPathNameW(path, (uint)full.Capacity, full, out filePart);
+        }
+        return length == 0 || length >= full.Capacity ? null : full.ToString();
+    }
+
+    static bool DotSegment(string path)
+    {
+        foreach (string part in path.Split('\\', '/'))
+        {
+            if (part == "." || part == "..") return true;
+        }
+        return false;
+    }
+
+    // Whether the path names a sign-in file, whatever folder it's in: a name starting .claude.json, .credentials.json in
+    // a .claude folder, or anything in .claude\backups. Streams and the trailing dots and spaces Win32 ignores are removed.
+    internal static bool NamesTarget(string path)
+    {
+        if (path == null) return false;
+        List<string> parts = new List<string>();
+        foreach (string part in path.Split('\\'))
+        {
+            string p = part;
+            int colon = p.IndexOf(':');
+            if (colon >= 0) p = p.Substring(0, colon);
+            p = p.TrimEnd('.', ' ');
+            if (p.Length > 0) parts.Add(p);
+        }
+        if (parts.Count == 0) return false;
+        string last = parts[parts.Count - 1];
+        if (last.StartsWith(".claude.json", StringComparison.OrdinalIgnoreCase)) return true;
+        if (parts.Count >= 2 && last.Equals(".credentials.json", StringComparison.OrdinalIgnoreCase) && parts[parts.Count - 2].Equals(".claude", StringComparison.OrdinalIgnoreCase)) return true;
+        for (int i = 0; i + 2 < parts.Count; i++)
+        {
+            if (parts[i].Equals(".claude", StringComparison.OrdinalIgnoreCase) && parts[i + 1].Equals("backups", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    static GuardResult Resolve(string candidate, bool search, ref Targets targets)
+    {
+        if (candidate == null) return GuardResult.Unresolved;
+        bool overlong = candidate.Length >= MaxPath && !candidate.StartsWith(@"\\?\");
+        string path = Lexical(candidate);
+        if (path == null) return NamesTarget(candidate) ? GuardResult.SignIn : GuardResult.Unresolved;
+        if (NamesTarget(path)) return GuardResult.SignIn;
+        // A file reached through a stream: the file itself counts too.
+        string last = path.Substring(path.LastIndexOf('\\') + 1);
+        int colon = last.IndexOf(':');
+        GuardResult worst = GuardResult.Clear;
+        if (colon >= 0)
+        {
+            worst = Resolve(path.Substring(0, path.Length - last.Length + colon), search, ref targets);
+            if (worst == GuardResult.SignIn) return worst;
+        }
+        path = Substitute(path);
+        if (path == null || !LocalDisk(path)) return GuardResult.Unresolved;
+        if (overlong) path = path.StartsWith(@"\\.\") ? @"\\?\" + path.Substring(4) : path.StartsWith(@"\\?\") ? path : @"\\?\" + path;
+        if (targets == null) targets = CurrentTargets();
+        GuardResult found = overlong ? GuardResult.Unresolved : GuardResult.Clear;
+        int error;
+        Opened o = Open(path, out error);
+        if (o != null)
+        {
+            if (targets.Ids.Contains(o.Id) || NamesTarget(o.Final) || Contains(targets.Finals, o.Final)) return GuardResult.SignIn;
+            if (search && o.Directory)
+            {
+                if (o.Final == null) return GuardResult.Unresolved;
+                string root = o.Final.TrimEnd('\\') + "\\";
+                foreach (string f in targets.Finals)
+                {
+                    if (f.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return GuardResult.SignIn;
+                }
+            }
+            return Max(worst, found);
+        }
+        if (error != 2 && error != 3) return GuardResult.Unresolved;
+        // Not there: the nearest folder that is decides where it would be created.
+        int rootLength = RootLength(path);
+        string parent = path.TrimEnd('\\');
+        while (true)
+        {
+            int cut = parent.LastIndexOf('\\');
+            if (cut < 0 || cut + 1 < rootLength) return GuardResult.Unresolved;
+            parent = parent.Substring(0, cut + 1);
+            Opened p = Open(parent, out error);
+            if (p != null)
+            {
+                if (!p.Directory || p.Final == null) return GuardResult.Unresolved;
+                string full = p.Final.TrimEnd('\\') + "\\" + path.Substring(parent.Length);
+                return NamesTarget(full) ? GuardResult.SignIn : Max(worst, found);
+            }
+            if (error != 2 && error != 3) return GuardResult.Unresolved;
+            parent = parent.TrimEnd('\\');
+        }
+    }
+
+    static bool Contains(List<string> list, string item)
+    {
+        if (item == null) return false;
+        foreach (string s in list)
+        {
+            if (string.Equals(s, item, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    // A subst drive letter replaced by the local folder it stands for; null when it stands for anything else.
+    static string Substitute(string path)
+    {
+        for (int i = 0; i < 4; i++)
+        {
+            Match m = Regex.Match(path, @"^(?:\\\\[?.]\\)?([A-Za-z]:)\\");
+            if (!m.Success) return path;
+            string target = DosDevice(m.Groups[1].Value);
+            if (target == null) return null;
+            if (!target.StartsWith(@"\??\")) return path;
+            string folder = target.Substring(4);
+            if (!Regex.IsMatch(folder, @"^[A-Za-z]:(\\|$)")) return null;
+            path = folder.TrimEnd('\\') + "\\" + path.Substring(m.Length);
+        }
+        return null;
+    }
+
+    static string DosDevice(string drive)
+    {
+        if (DosDeviceForTests != null) return DosDeviceForTests(char.ToUpperInvariant(drive[0]));
+        StringBuilder target = new StringBuilder(1024);
+        return QueryDosDeviceW(drive, target, target.Capacity) == 0 ? null : target.ToString();
+    }
+
+    // Whether this is a path on a local disk, decided without opening it: a fixed or removable drive letter that is a
+    // disk volume, a local \\?\Volume{GUID}\, or \\?\GLOBALROOT\Device\HarddiskVolumeN\. Network paths, mapped drives,
+    // pipes, devices and device names such as NUL or COM1 never are.
+    internal static bool LocalDisk(string path)
+    {
+        if (path == null || path.Length < 3 || (path.Length > 4 && path.IndexOfAny(new[] { '*', '?' }, 4) >= 0)) return false;
+        int root = RootLength(path);
+        if (root == 0 || path.StartsWith(@"\\") && !Regex.IsMatch(path, @"^\\\\[?.]\\", RegexOptions.None)) return false;
+        foreach (string part in path.Substring(root).Split('\\'))
+        {
+            string name = part;
+            int colon = name.IndexOf(':');
+            if (colon >= 0) name = name.Substring(0, colon);
+            int dot = name.IndexOf('.');
+            if (dot >= 0) name = name.Substring(0, dot);
+            if (DeviceName.IsMatch(name.TrimEnd(' '))) return false;
+        }
+        Match drive = Regex.Match(path, @"^(?:\\\\[?.]\\)?([A-Za-z]:)\\");
+        if (drive.Success)
+        {
+            string target = DosDevice(drive.Groups[1].Value);
+            if (target == null || !Regex.IsMatch(target, @"^\\Device\\HarddiskVolume[0-9]+$", RegexOptions.IgnoreCase)) return false;
+            if (OpenLogForTests != null) OpenLogForTests(drive.Groups[1].Value + "\\");
+            uint type = GetDriveTypeW(drive.Groups[1].Value + "\\");
+            return type == 2 || type == 3;
+        }
+        Match volume = Regex.Match(path, @"^\\\\[?.]\\Volume\{[0-9A-Fa-f-]{36}\}\\", RegexOptions.IgnoreCase);
+        if (volume.Success)
+        {
+            if (OpenLogForTests != null) OpenLogForTests(@"\\?\" + volume.Value.Substring(4));
+            uint type = GetDriveTypeW(@"\\?\" + volume.Value.Substring(4));
+            return type == 2 || type == 3;
+        }
+        return Regex.IsMatch(path, @"^\\\\[?.]\\GLOBALROOT\\Device\\HarddiskVolume[0-9]+\\", RegexOptions.IgnoreCase);
+    }
+
+    // Opens only a path LocalDisk has passed. Null when it can't be opened, with the Win32 error.
+    static Opened Open(string path, out int error)
+    {
+        error = 0;
+        if (OpenLogForTests != null) OpenLogForTests(path);
+        IntPtr handle = CreateFileW(path, FileReadAttributes, ShareAll, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1))
+        {
+            error = Marshal.GetLastWin32Error();
+            return null;
+        }
+        try
+        {
+            FileInfo info;
+            if (!GetFileInformationByHandle(handle, out info)) { error = Marshal.GetLastWin32Error(); return null; }
+            Opened o = new Opened();
+            o.Id = info.VolumeSerial.ToString("x8") + ":" + info.IndexHigh.ToString("x8") + info.IndexLow.ToString("x8");
+            o.Directory = (info.Attributes & DirectoryAttribute) != 0;
+            StringBuilder final = new StringBuilder(1024);
+            uint length = GetFinalPathNameByHandleW(handle, final, (uint)final.Capacity, 0);
+            if (length > final.Capacity)
+            {
+                final = new StringBuilder((int)length + 1);
+                length = GetFinalPathNameByHandleW(handle, final, (uint)final.Capacity, 0);
+            }
+            if (length > 0 && length < final.Capacity)
+            {
+                string s = final.ToString();
+                o.Final = s.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ? @"\\" + s.Substring(8) : s.StartsWith(@"\\?\") ? s.Substring(4) : s;
+            }
+            return o;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    // A file's volume serial and index, the same for every name, link and form that leads to it. Null for a path
+    // that isn't on a local disk or can't be opened.
+    internal static string Identity(string path)
+    {
+        int error;
+        Opened o = LocalDisk(path) ? Open(path, out error) : null;
+        return o == null ? null : o.Id;
+    }
+
+    // Whether a command names a sign-in file: the plain pattern, the same with quotes, backticks, carets and + taken
+    // out (cl`aude, cl^aude, "cla""ude.json", '.cla'+'ude.json'), and wildcards that would match one (.c?aude.json,
+    // .claude.jso[n]). A command can still read them without naming them, for example through a script.
+    internal static bool CommandNamesTarget(string command)
+    {
+        if (command == null) return false;
+        if (CommandPattern.IsMatch(command)) return true;
+        string cleaned = Regex.Replace(command, @"[`^""'+]", "");
+        if (CommandPattern.IsMatch(cleaned)) return true;
+        if (Regex.IsMatch(cleaned.Replace("\\", ""), @"claude\.json|credential", RegexOptions.IgnoreCase)) return true;
+        foreach (string token in Regex.Split(command, @"[\s;|&<>()]+"))
+        {
+            if (token.Length == 0) continue;
+            string bare = Regex.Replace(token, @"[`^""'+\\]", "");
+            foreach (string word in new[] { "claude", "cred" })
+            {
+                if (bare.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0 && token.IndexOf(word, StringComparison.OrdinalIgnoreCase) < 0) return true;
+            }
+            foreach (string segment in Regex.Replace(token, @"[`^""'+]", "").Split('/', '\\'))
+            {
+                if (WildcardMatchesTarget(segment)) return true;
+            }
+        }
+        return false;
+    }
+
+    static bool WildcardMatchesTarget(string segment)
+    {
+        if (segment.IndexOfAny(new[] { '*', '?', '[', '{' }) < 0) return false;
+        StringBuilder pattern = new StringBuilder("^");
+        StringBuilder literal = new StringBuilder();
+        List<string> pieces = new List<string>();
+        for (int i = 0; i < segment.Length; i++)
+        {
+            char c = segment[i];
+            if (c == '*' || c == '?' || c == '[' || c == '{') { pieces.Add(literal.ToString()); literal.Length = 0; }
+            if (c == '*') { pattern.Append(".*"); continue; }
+            if (c == '?') { pattern.Append('.'); continue; }
+            int close = c == '[' && i + 2 <= segment.Length ? segment.IndexOf(']', i + 2) : c == '{' ? segment.IndexOf('}', i + 1) : -1;
+            if (close > i)
+            {
+                string inside = segment.Substring(i + 1, close - i - 1);
+                if (c == '[')
+                {
+                    bool not = inside.StartsWith("!") || inside.StartsWith("^");
+                    if (not) inside = inside.Substring(1);
+                    pattern.Append(not ? "[^" : "[").Append(inside.Replace("\\", "\\\\").Replace("[", "\\[")).Append(']');
+                }
+                else
+                {
+                    List<string> options = new List<string>();
+                    foreach (string o in inside.Split(',')) options.Add(Regex.Escape(o));
+                    pattern.Append("(?:").Append(string.Join("|", options.ToArray())).Append(')');
+                }
+                i = close;
+                continue;
+            }
+            pattern.Append(Regex.Escape(c.ToString()));
+            literal.Append(c);
+        }
+        pattern.Append('$');
+        pieces.Add(literal.ToString());
+        // Only a pattern that spells part of a name counts: it starts with .c, or a run of three or more of its literal
+        // letters comes from "claude" or "credentials". So *.json, *.js* or *on don't.
+        bool spells = segment.StartsWith(".c", StringComparison.OrdinalIgnoreCase);
+        foreach (string piece in pieces)
+        {
+            for (int k = 0; k + 3 <= piece.Length && !spells; k++)
+            {
+                string run = piece.Substring(k, 3);
+                spells = "claude".IndexOf(run, StringComparison.OrdinalIgnoreCase) >= 0 || "credentials".IndexOf(run, StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+        }
+        if (!spells) return false;
+        Regex regex;
+        try { regex = new Regex(pattern.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant); }
+        catch (ArgumentException) { return false; }
+        foreach (string name in TargetNames)
+        {
+            if (regex.IsMatch(name)) return true;
+        }
+        return false;
+    }
+}
+
 // Runs one `claude -p` request. Message text only travels through stdin, because
 // other processes can see command lines, and it's never written anywhere from here. The system prompt text (the
 // saved instructions and the widget's rules) goes in a temporary file for the same reason, deleted when the request ends.
