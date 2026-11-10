@@ -227,7 +227,28 @@ static partial class H4
         return c;
     }
 
-    static bool ChipShown(ChatWindow c) { return ((Border)Get(c, "bypassChip")).Visibility == Visibility.Visible; }
+    static bool ChipShown(ChatWindow c)
+    {
+        Border chip = (Border)Get(c, "bypassChip");
+        return chip.Visibility == Visibility.Visible && ((DockPanel)Get(c, "chatHeader")).Children.Contains(chip);
+    }
+
+    // What UI Automation exposes for the window: every peer's name and help text, walked from the window's own peer.
+    static List<string[]> AutomationNames(Window w)
+    {
+        List<string[]> found = new List<string[]>();
+        System.Windows.Automation.Peers.AutomationPeer top = System.Windows.Automation.Peers.UIElementAutomationPeer.CreatePeerForElement(w);
+        Queue<System.Windows.Automation.Peers.AutomationPeer> todo = new Queue<System.Windows.Automation.Peers.AutomationPeer>();
+        if (top != null) todo.Enqueue(top);
+        while (todo.Count > 0)
+        {
+            System.Windows.Automation.Peers.AutomationPeer p = todo.Dequeue();
+            found.Add(new[] { p.GetName(), p.GetHelpText() ?? "" });
+            List<System.Windows.Automation.Peers.AutomationPeer> kids = p.GetChildren();
+            if (kids != null) foreach (System.Windows.Automation.Peers.AutomationPeer k in kids) todo.Enqueue(k);
+        }
+        return found;
+    }
     static string Footer(ChatWindow c) { return ((TextBlock)Get(c, "saveNote")).Text; }
     static void ValidMarker(string d) { File.WriteAllText(BypassFile(d), BypassState.Protect(BypassState.Marker, BypassState.Entropy)); }
 
@@ -269,12 +290,29 @@ static partial class H4
             && lightText == WidgetWindow.Hex("#8F5700") && darkText == WidgetWindow.Hex("#E5B454"), light + " " + dark);
         tw.Close();
         Border chip = (Border)Get(bypassChat, "bypassChip");
-        Check("W-B32 the chip's automation name is exact, and it reads Bypass on",
-            System.Windows.Automation.AutomationProperties.GetName(chip) == "Bypass permissions on for this chat" && ((TextBlock)chip.Child).Text == "Bypass on");
+        List<string[]> exposed = AutomationNames(bypassChat), exposedNormal = AutomationNames(normalChat);
+        string tip = "This chat edits files, runs commands and opens sites without asking. Sign-in files are refused by name; scripts can get past that. New chats follow Settings; this chat keeps its mode.";
+        Check("W-B32 UI Automation exposes the chip once, by its exact name with the tooltip as help text, and it reads Bypass on",
+            exposed.Count(x => x[0] == "Bypass permissions on for this chat" && x[1] == tip) == 1 && ((TextBlock)chip.Child).Text == "Bypass on",
+            exposed.Count(x => x[0].StartsWith("Bypass")) + " bypass peers");
+        Check("W-B32 a normal chat's header has no chip, and UI Automation exposes nothing about bypass",
+            !((DockPanel)Get(normalChat, "chatHeader")).Children.Contains((Border)Get(normalChat, "bypassChip")) && !exposedNormal.Any(x => x[0].Contains("Bypass") || x[1].Contains("without asking")),
+            string.Join(", ", exposedNormal.Where(x => x[0].Contains("Bypass")).Select(x => x[0]).ToArray()));
         Check("W-B33 the chip's tooltip is exact (DEC-9)", (string)chip.ToolTip == "This chat edits files, runs commands and opens sites without asking. Sign-in files are refused by name; scripts can get past that. New chats follow Settings; this chat keeps its mode.");
         Check("W-B34 the footer says changes and commands run without asking in a bypass chat, and asks in a normal one",
             Footer(bypassChat).EndsWith(" Reads your files. Changes and commands run without asking.") && Footer(normalChat).EndsWith(" Reads your files. Asks before changes or commands."),
             Footer(bypassChat) + " | " + Footer(normalChat));
+        string dr = Fresh("wb-chip-read");
+        File.WriteAllText(Path.Combine(dr, "chat-access.txt"), "laptop");
+        Directory.CreateDirectory(Path.Combine(dr, "history"));
+        Directory.CreateDirectory(Path.Combine(dr, "notes"));
+        File.WriteAllText(Path.Combine(dr, "chat-history-folder.txt"), Path.Combine(dr, "history"));
+        File.WriteAllText(Path.Combine(dr, "chat-read-folders.txt"), Path.Combine(dr, "notes"));
+        ChatWindow readBypass = ChipChat(dr, true), readNormal = ChipChat(dr, false);
+        Check("W-B34 with read folders, a bypass chat's footer still says changes and commands run without asking; a normal one doesn't",
+            Footer(readBypass) == "Can read your chat history and chosen folders. Changes and commands run without asking." && Footer(readNormal) == "Can read your chat history and chosen folders.",
+            Footer(readBypass) + " | " + Footer(readNormal));
+        readBypass.Close(); readNormal.Close();
         bypassChat.Close(); normalChat.Close(); noLaptop.Close();
 
         // W-B35 to 39: the mode for the chat's life, and New chat (DEC-19)

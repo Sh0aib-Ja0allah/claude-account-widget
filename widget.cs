@@ -7870,6 +7870,7 @@ class ChatWindow : Window
     const string UnsavedNote = "Not being saved. Can't recall other chats.";
     const string LaptopNote = " Reads your files. Asks before changes or commands.";
     internal const string BypassNote = " Reads your files. Changes and commands run without asking.";
+    internal const string BypassActsNote = " Changes and commands run without asking.";
     internal const string BypassChipTip = "This chat edits files, runs commands and opens sites without asking. Sign-in files are refused by name; scripts can get past that. New chats follow Settings; this chat keeps its mode.";
     internal const string BypassChipName = "Bypass permissions on for this chat";
     const string SecondBrainNote = "Can read your chat history and chosen folders.";
@@ -7952,6 +7953,7 @@ class ChatWindow : Window
     readonly SolidColorBrush composerEdge = new SolidColorBrush();
     readonly SolidColorBrush warningText = new SolidColorBrush();
     readonly Border bypassChip = new Border();
+    readonly TextBlock bypassText = new TextBlock();
     readonly SolidColorBrush bypassFill = new SolidColorBrush();
 
     readonly Border cardBorder = new Border();
@@ -8387,7 +8389,6 @@ class ChatWindow : Window
         MakeButton(minimizeButton, delegate { WindowState = WindowState.Minimized; });
 
         // A clear amber marker for as long as this chat is in bypass mode.
-        TextBlock bypassText = new TextBlock();
         bypassText.Text = "Bypass on";
         bypassText.FontSize = 11;
         bypassText.FontWeight = FontWeights.SemiBold;
@@ -8399,9 +8400,10 @@ class ChatWindow : Window
         bypassChip.VerticalAlignment = VerticalAlignment.Center;
         bypassChip.Background = bypassFill;
         bypassChip.ToolTip = BypassChipTip;
-        System.Windows.Automation.AutomationProperties.SetName(bypassChip, BypassChipName);
+        // Screen readers get the name and the tooltip's words from the text itself.
+        System.Windows.Automation.AutomationProperties.SetName(bypassText, BypassChipName);
+        System.Windows.Automation.AutomationProperties.SetHelpText(bypassText, BypassChipTip);
         DockPanel.SetDock(bypassChip, Dock.Right);
-        ShowBypassMode();
 
         chatTitle.Text = "New chat";
         chatTitle.FontSize = 13;
@@ -8420,7 +8422,8 @@ class ChatWindow : Window
         header.Children.Add(closeButton);
         header.Children.Add(extendButton);
         header.Children.Add(minimizeButton);
-        header.Children.Add(bypassChip);
+        // Only a bypass chat has the chip at all, so a normal chat's header never contains it, hidden or not.
+        if (bypassMode) header.Children.Add(bypassChip);
         header.Children.Add(historyToggle);
         header.Children.Add(headerSpark);
         header.Children.Add(BuildTitleArea());
@@ -9150,7 +9153,9 @@ class ChatWindow : Window
 
     void ShowBypassMode()
     {
-        bypassChip.Visibility = bypassMode ? Visibility.Visible : Visibility.Collapsed;
+        bool shown = chatHeader.Children.Contains(bypassChip);
+        if (bypassMode && !shown) chatHeader.Children.Insert(chatHeader.Children.IndexOf(historyToggle), bypassChip);
+        else if (!bypassMode && shown) chatHeader.Children.Remove(bypassChip);
     }
 
     // Continues a saved chat here, or switches to the window that already has it open,
@@ -10610,7 +10615,7 @@ class ChatWindow : Window
         }
         else
         {
-            saveNote.Text = noteWriter != null && readFolders.Count > 0 ? SecondBrainNote
+            saveNote.Text = noteWriter != null && readFolders.Count > 0 ? SecondBrainNote + (bypassMode ? BypassActsNote : "")
                 : (noteWriter != null ? SavedNote : UnsavedNote) + (bypassMode ? BypassNote : laptopAccess ? LaptopNote : "");
             saveNote.Foreground = WidgetWindow.Muted;
         }

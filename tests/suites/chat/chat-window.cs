@@ -2259,7 +2259,7 @@ static class H3
             List<string> first = FakeLines("REPLY ").Skip(before).ToList();
             Border chip = (Border)Get(w, "bypassChip");
             Check("C-B20 a chat window opened in bypass shows the chip, and its Write is allowed with no card",
-                w.BypassMode && chip.Visibility == Visibility.Visible && first.Count == 1 && first[0].Contains("\"behavior\":\"allow\""), string.Join(" | ", first.ToArray()));
+                w.BypassMode && chip.Visibility == Visibility.Visible && ((DockPanel)Get(w, "chatHeader")).Children.Contains(chip) && first.Count == 1 && first[0].Contains("\"behavior\":\"allow\""), string.Join(" | ", first.ToArray()));
 
             BypassState state = new BypassState(d, false);
             string off = state.TurnOff();
@@ -2275,7 +2275,7 @@ static class H3
             fresh.ShowActivated = false; fresh.Left = -6000; fresh.Top = 50; fresh.Width = 396; fresh.Height = 536;
             fresh.Show();
             Check("C-B22 a new chat after turning off is normal: no chip and the asking footer",
-                !fresh.BypassMode && ((Border)Get(fresh, "bypassChip")).Visibility == Visibility.Collapsed
+                !fresh.BypassMode && !((DockPanel)Get(fresh, "chatHeader")).Children.Contains((Border)Get(fresh, "bypassChip"))
                 && ((TextBlock)Get(fresh, "saveNote")).Text.EndsWith(" Asks before changes or commands."));
             fresh.Close();
         }
