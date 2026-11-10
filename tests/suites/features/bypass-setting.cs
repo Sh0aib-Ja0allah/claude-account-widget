@@ -140,6 +140,7 @@ static class H21
         File.WriteAllText(MarkerFile(d), "off");
         state = new BypassState(d, false);
         using (new FileStream(MarkerFile(d), FileMode.Open, FileAccess.ReadWrite, FileShare.None)) error = state.TurnOn();
+        Check("H21-28 the turn-on error text ends without a line break", error != null && !error.EndsWith("\n") && !error.EndsWith("\r"), error ?? "null");
         Check("H21-09 a failed write (file locked) leaves bypass off and says why", error != null && error.StartsWith("Couldn't turn on bypass permissions: ") && !state.ForNewChats && !Loads(d), error ?? "null");
         Check("H21-09 Turn on refuses in a test copy and without laptop access",
             new BypassState(d, true).TurnOn() == "Couldn't turn on bypass permissions: this is a test copy"
@@ -156,6 +157,12 @@ static class H21
         state = new BypassState(d, false);
         using (new FileStream(MarkerFile(d), FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) error = state.TurnOff();
         Check("H21-11 when the delete fails, the file is overwritten with off", error == null && File.ReadAllText(MarkerFile(d)) == "off" && !Loads(d) && !state.ClearPending, error ?? "");
+        if (File.Exists(MarkerFile(d))) File.Delete(MarkerFile(d));
+        Marker(d);
+        File.SetAttributes(MarkerFile(d), FileAttributes.ReadOnly);
+        BypassState readOnly = new BypassState(d, false);
+        string readOnlyError = readOnly.TurnOff();
+        Check("H21-27 a read-only marker is still cleared: the file is gone, with no error", readOnlyError == null && !File.Exists(MarkerFile(d)) && !readOnly.ClearPending && !Loads(d), readOnlyError ?? "");
         Marker(d);
         state = new BypassState(d, false);
         FileStream held = new FileStream(MarkerFile(d), FileMode.Open, FileAccess.Read, FileShare.None);

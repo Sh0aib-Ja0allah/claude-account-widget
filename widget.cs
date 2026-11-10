@@ -270,7 +270,7 @@ class BypassState
         catch (Exception e)
         {
             if (!(e is IOException || e is UnauthorizedAccessException || e is System.ComponentModel.Win32Exception)) throw;
-            return string.Format(TurnOnFailedText, e.Message);
+            return string.Format(TurnOnFailedText, e.Message.TrimEnd('\r', '\n'));
         }
         on = true;
         clearPending = false;
@@ -313,7 +313,13 @@ class BypassState
         string file = MarkerPath;
         try
         {
-            if (File.Exists(file)) File.Delete(file);
+            if (File.Exists(file))
+            {
+                // A read-only marker (made read-only by hand or by another program) must still go.
+                FileAttributes attributes = File.GetAttributes(file);
+                if ((attributes & FileAttributes.ReadOnly) != 0) File.SetAttributes(file, attributes & ~FileAttributes.ReadOnly);
+                File.Delete(file);
+            }
             return null;
         }
         catch (IOException) { }
@@ -323,8 +329,8 @@ class BypassState
             File.WriteAllText(file, "off");
             return null;
         }
-        catch (IOException e) { return e.Message.TrimEnd('.'); }
-        catch (UnauthorizedAccessException e) { return e.Message.TrimEnd('.'); }
+        catch (IOException e) { return e.Message.TrimEnd('\r', '\n', '.'); }
+        catch (UnauthorizedAccessException e) { return e.Message.TrimEnd('\r', '\n', '.'); }
     }
 
     static bool LaptopOnDisk(string dataFolder)
