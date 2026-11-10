@@ -22,7 +22,7 @@ This is an early pre-release, so expect some rough edges.
 - **Usage history:** a chart of the current 7-day period against an even pace, and the peak of each of the last 8 periods. A row is recorded at each usage check, so a gap means no check ran, for example while Anthropic had paused checks.
 - **Usage alerts:** optional Windows notifications when your 7-day usage reaches 70% and 90%, and when the limit resets. Off until you turn them on in Settings.
 - **Update notice:** once a day it asks GitHub whether a newer version has been released, and shows a line on the widget if so. It never downloads or installs anything.
-- **Settings:** a window for the new chat shortcut, usage alerts, update checks, the expected account, chat history folder, folders chats can read, saved instructions and laptop access, so you don't have to write the files by hand.
+- **Settings:** a window for the new chat shortcut, usage alerts, update checks, the expected account, chat history folder, folders chats can read, saved instructions, laptop access and bypass permissions, so you don't have to write the files by hand.
 - **Saved instructions:** standing instructions, such as how you like answers written, sent with every new chat.
 - **Account menu in chats:** in a full-screen chat, your account sits at the bottom of the chat list, with the widget's menu and a shortcut to Settings.
 - **New chat:** opens chat windows that use your Claude Code sign-in, show formatted replies as they're written, save to a folder you choose and can look back at earlier saved chats.
@@ -153,7 +153,7 @@ The widget assumes the window started exactly 7 days before it resets.
 
 ## Optional settings
 
-Right-click the widget and choose **Settings** to set these. Click **Save** to apply them. Some act at once without **Save**: the usage alerts and update checks switches, and the shortcut's **Set** and **Turn off**. Laptop access takes effect when you confirm it or turn it off. Open chats keep what they started with, and new chats use the new settings. Settings only writes a file you changed, so anything you wrote by hand in the others stays as it is.
+Right-click the widget and choose **Settings** to set these. Click **Save** to apply them. Some act at once without **Save**: the usage alerts and update checks switches, and the shortcut's **Set** and **Turn off**. Laptop access and bypass permissions take effect when you confirm them in their warning or turn them off. Open chats keep what they started with, and new chats use the new settings. Settings only writes a file you changed, so anything you wrote by hand in the others stays as it is.
 
 Each setting is a text file in the folder where the widget is installed, so you can also write them by hand.
 
@@ -180,6 +180,14 @@ Each setting is a text file in the folder where the widget is installed, so you 
 
 Read a card before you allow it, because a command can do anything your Windows account can do. Claude is told not to touch your Claude Code sign-in and is blocked from opening the sign-in files directly, but an allowed command could get around that.
 
+**Bypass permissions for chats:** turn it on in Settings. It needs laptop access, and Settings shows a warning first. New chat windows then read, edit and create files anywhere your Windows account can, run commands and open sites, all without a card. A chat in this mode shows an amber **Bypass on** chip at the top, and its footer says changes and commands run without asking.
+
+- **Still refused:** reading, searching or changing Claude Code's sign-in files (`~/.claude/.credentials.json`, `~/.claude.json` and its copies, and `~/.claude/backups`) when a tool names them, and searching your whole home folder or a drive root (a command that searches them gets a card instead).
+- **Still asked with a card:** changes to settings, git and tool-configuration files, such as anything in `.git`, `.vscode` or `.claude` and files like `.gitconfig` or a PowerShell profile; this widget's own folder; the Startup folder and other start-up items; network paths; and any path the widget can't trace to a file on a local disk. These cards appear even when the file is in the output folder.
+- **Not blocked:** this isn't an operating-system lock. A script or program Claude runs, such as Python, Node or PowerShell, can still read any of your files, including the sign-in files, and send them to a web site. Text in a web page, file or note could trick Claude into doing that, and no card would stop it. Changes can outlast the chat, for example to other programs' settings.
+
+Open chats keep the mode they started with. Only new chat windows follow the switch, and **New chat** in an open window can turn bypass off for that window but never on. Turning laptop access off turns bypass off too, and turning laptop access back on doesn't turn bypass on again. The switch is saved in `chat-bypass.txt` as a marker encrypted for your Windows account, and anything else in that file counts as off. That makes it harder for another program to turn bypass on, but a program running as you could still write a valid marker, so whenever bypass is on as the widget starts, it shows a notice saying so. If you didn't turn it on, turn it off in Settings. Test copies of the widget never use bypass.
+
 **Status line:** this shows usage in the Claude Code terminal footer. It needs Node.js and `statusline.js`, which the source build installs. Add this to `~/.claude/settings.json`, using your own Windows username:
 
 ```json
@@ -205,6 +213,7 @@ Read a card before you allow it, because a command can do anything your Windows 
 | A temporary file in `%TEMP%\ClaudeAccountWidget-chat` | Holds the saved instructions and the widget's rules for one `claude -p` request, so they never appear on a command line. Beside it, a settings file for the same request asks Claude Code to check every tool call with the window, so the widget's own rules always apply. Both stay open, read-only to other programs, while the request runs, and are deleted when the reply ends; any left by a crash are removed after a day |
 | Your chat history folder | Claude can search and read its notes, and the widget writes one note for each chat |
 | Your files and web search | Only with laptop access on. See [Optional settings](#optional-settings) |
+| `chat-bypass.txt` | Bypass permissions for new chats, if you turned them on. Holds a marker encrypted for your Windows account, read once when the widget starts. Anything else in the file counts as off |
 
 The widget only sends the token to those two Anthropic addresses. It doesn't save it anywhere else or renew it. The `claude` command it starts for chats handles its own sign-in, and may renew it as Claude Code normally does.
 
@@ -215,6 +224,7 @@ The widget saves its usage figures, your email and its settings in its install f
 - Anthropic receives each message and its context, including attachments and any saved chat text or file Claude reads to answer. Replies count toward your plan's usage.
 - Chats run through `claude -p` with session saving, Remote Control, hooks, plugins and MCP servers off, so the note in your folder is the only saved copy on your computer. Remote Control is what would otherwise show a local session on claude.ai.
 - Notes are plain, unencrypted files. Anyone who can open that folder can read them, including through a sync service or a shared vault.
+- With bypass permissions on, a new chat edits files, runs commands and opens sites without a card, apart from the refusals and cards listed under [Optional settings](#optional-settings).
 - Without laptop access, Claude's file access is limited to the chat history folder, with read-only tools. Text in notes, files and search results is treated as information, not instructions, but that relies on Claude following its instructions.
 
 ## Troubleshooting
@@ -231,6 +241,9 @@ The widget saves its usage figures, your email and its settings in its install f
 | Couldn't save the last reply. | The note couldn't be written, so check the folder. The chat keeps working, and the next reply tries again. |
 | Claude Code wasn't found. | `claude` isn't on your PATH. |
 | Claude Code isn't signed in. | Sign in to Claude Code in a terminal, then try again. |
+| The bypass permissions switch is greyed out. | It needs laptop access, so turn that on first. A test copy of the widget never offers it. |
+| Couldn't save the change: ... it could come back after the widget restarts. | Something has `chat-bypass.txt` open, so the widget couldn't remove it. New chats are normal for now. Close the program using the file and turn bypass off again. The widget also tries again when the next chat starts and when it exits. |
+| A notice says bypass permissions are on. | Bypass was on when the widget started. If you didn't turn it on, turn it off in Settings. |
 | The chat shortcut ... is in use by another app. | Another app registered that combination first. Choose a different one in Settings. |
 | No usage alert appeared | Alerts are off until you turn them on in Settings. Each shows once for each 7-day period. Windows can hold back notifications while Do not disturb is on or a full-screen app is running. |
 | `build.ps1` says the running widget didn't exit within 10 seconds. | The build closes a running copy first and waits for it to exit. End `ClaudeAccountWidget.exe` in Task Manager, then run `build.ps1` again. |
@@ -262,7 +275,7 @@ GitHub runs the build and the quick tests on Windows for every push and pull req
 
 ## Releasing a new version
 
-Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.2.1`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none. Build the exe for the release with `build.ps1 -OutDir` from a clean copy of the tagged commit, not your working folder, and put its SHA-256 in the release notes. The update notice reads pre-releases too.
+Raise `AppVersion` in `widget.cs` first, then tag the release `v` plus that number, such as `v0.5.0`. The update notice compares this number with the tags on GitHub, so a release whose tag doesn't match would show the wrong notice or none. Build the exe for the release with `build.ps1 -OutDir` from a clean copy of the tagged commit, not your working folder, and put its SHA-256 in the release notes. The update notice reads pre-releases too.
 
 ## License
 

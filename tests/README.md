@@ -5,7 +5,7 @@ These tests compile the widget's own source with the C# compiler that comes with
 They're built to be safe to run on your own PC:
 
 - Every window opens off screen and never takes focus.
-- Every server is a fake one on `127.0.0.1`, on ports picked when the run starts. Nothing is sent to Anthropic or GitHub, and no real Claude request is made.
+- Every server is a fake one on `127.0.0.1`, on ports picked when the run starts. Nothing is sent to Anthropic or GitHub, and no real Claude request is made. Claude Code is replaced by `fakes/fake-claude.cs`, which plays a script and logs what the widget answered.
 - Nothing touches your installed widget, your Claude Code sign-in files or your files. All the work happens in a scratch folder outside the repo.
 - The app is only ever built with `build.ps1 -OutDir <scratch folder>`. Without `-OutDir`, `build.ps1` installs over the real widget, so the test script never calls it that way.
 
@@ -21,7 +21,7 @@ powershell -ExecutionPolicy Bypass -File .\tests\run-tests.ps1 -Mode chat -KeepS
 |---|---|---|
 | `quick` (default) | The safety lint, then the feature checks in `suites/features` that run in one process: settings window, usage alerts, limit forecast, history recording and chart, chat shortcut, update notice, account profile and tiers, sidebar account, saved instructions, long chats and starting claude, the sign-in guard (in a decoy home; it checks that network paths, pipes and devices are never opened), the permission decisions (what each tool call gets in a normal and a bypass chat), and the bypass setting (`chat-bypass.txt` and its protected marker, when it loads on, turning it on and off) | .NET Framework 4.8, which Windows 10 and 11 include |
 | `chat` | `chat-window`: formatted replies, live replies, regenerate, edit, search, the saved-instructions file, starting claude off the window's thread, long chats drawn a batch at a time, how each tool call is answered in a normal and a bypass chat (`chat-bypass`: the fake claude asks for each tool and logs the answer and the request's settings file), and a crash check. Each part runs in its own process with its own history folder. Then the long-chat notes (`long-chat-fixtures` checks them with the safety lint) and `long-chats-perf`, which opens them and reports timings to `out\long-chats-perf\run\results.md`. A timing fails only when its median is over 3 times its target | The same |
-| `widget` | The widget suite (`suites/widget`, every section), including runs of the built app in test mode. Also `process-tree` and `kill-tree` (stopping a chat's processes) and `shared-pieces` (the status line and shared files) | The same. `shared-pieces` needs Node.js and is skipped without it |
+| `widget` | The widget suite (`suites/widget`, every section), including runs of the built app in test mode, and the bypass permissions switch, warning, chat chip and start-up notice (`bypass-switch.cs`). Also `process-tree` and `kill-tree` (stopping a chat's processes) and `shared-pieces` (the status line and shared files) | The same. `shared-pieces` needs Node.js and is skipped without it |
 | `preview` | `file-preview`, the file preview. The sample files are generated when it runs | Python with `reportlab`, `python-pptx`, `openpyxl` and `Pillow`, and LibreOffice for the Office pages. Skipped without them |
 | `all` | quick, chat, widget and preview | All of the above |
 | `png` | Renders `docs/widget.png` from sample data into the scratch folder. Copy it to `docs/` by hand if it looks right | .NET Framework 4.8 |
@@ -104,6 +104,27 @@ The suites used to be called by number, after the order they were written. Their
 | `suites/features/h15.cs` | `suites/features/account-tiers.cs` |
 | `suites/features/h16.cs` | `suites/features/sidebar-account.cs` |
 | `suites/features/hk.cs` | `suites/features/process-tree.cs` |
+
+## Bypass permissions
+
+The checks for bypass permissions are spread over three modes:
+
+- `quick`: `sign-in-guard` (what counts as a sign-in file, in a decoy home), `permission-decisions` (what each tool call gets in a normal and a bypass chat, and which failures say Claude Code isn't signed in) and `bypass-setting` (`chat-bypass.txt`, its encrypted marker, and turning bypass on and off).
+- `chat`: `chat-bypass`, where the fake claude asks for each tool and the widget's answers and cards are checked, including writes the output folder moves, and a real chat window in bypass mode.
+- `widget`: `bypass-switch`, the Settings switch, the warning, the chip and the start-up notice.
+
+Test copies never use bypass. A test lets one load the setting through `WidgetWindow.BypassLoadForTests`.
+
+### The real-CLI check
+
+The fake claude can't show what the real Claude Code sends, so bypass permissions were also checked once outside the automated tests against Claude Code 2.1.318, with one real request. That check isn't part of these tests, and it doesn't run in CI. It used a scratch folder and a decoy home, never named the real sign-in files, and refused to run with an API key or token set. It found:
+
+- Every tool call that ran went through the widget's handler first, matched by `tool_use_id`; nothing ran without it. The two that didn't reach the handler were refused by Claude Code before running. Read, Grep and Glob came with `decision_reason_type` `rule` from the request's settings file.
+- A `can_use_tool` request carries `subtype`, `tool_name`, `display_name`, `input`, `description` and `tool_use_id`, and usually `decision_reason_type`, `decision_reason_rule_source` and `server_policy_ask_only`. A call matched by an ask rule also has `matched_ask_rule`, and a protected write also had `decision_reason`, `classifier_approvable` and `suppress_always_allow_rule`.
+- Edit refuses a file it hasn't read in the session, before asking, so such an Edit never reaches the handler.
+- `--restricted` refuses paths outside the working folders, such as a network path, before the handler.
+
+Only the git hook card was seen for real. The cards for the widget's `settings.txt` and network paths are checked against the fake claude.
 
 ## Writing a test
 
