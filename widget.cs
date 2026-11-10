@@ -222,6 +222,209 @@ static class WidgetFiles
     }
 }
 
+// Bypass permissions for new chats, saved as chat-bypass.txt in the data folder (DEC-7, DEC-21).
+// The file holds the Base64 of a DPAPI blob (current user, fixed entropy) of "bypass confirmed 1". Plain text, another
+// user's blob, the wrong entropy, corrupt data and an empty file all read as off. This raises the bar only: a script
+// running as the same Windows user can call DPAPI too, so bypass loading on at start-up is announced.
+// The file is read once, when the widget starts. After that memory decides, and a chat's mode is this AND its own read
+// of laptop access, so the disk can only ever turn bypass off. A test copy never loads it.
+class BypassState
+{
+    internal const string FileName = "chat-bypass.txt";
+    internal const string Marker = "bypass confirmed 1";
+    internal const string Entropy = "ClaudeAccountWidget bypass marker v1";
+    internal const string ClearFailedText = "Couldn't save the change: {0}. New chats won't use bypass now, but it could come back after the widget restarts. Close anything using {1} and turn it off again.";
+    internal const string TurnOnFailedText = "Couldn't turn on bypass permissions: {0}";
+
+    readonly string folder;
+    readonly bool blocked;
+    readonly bool loadedOn;
+    bool on;
+    bool clearPending;
+
+    public BypassState(string dataFolder, bool blockedHere)
+    {
+        folder = dataFolder;
+        blocked = blockedHere;
+        on = !blocked && LaptopOnDisk(folder) && HasMarker(folder);
+        loadedOn = on;
+    }
+
+    // True when bypass loaded on at start-up (the start-up notice uses it).
+    internal bool LoadedOn { get { return loadedOn; } }
+    internal bool Blocked { get { return blocked; } }
+    internal bool ClearPending { get { return clearPending; } }
+    internal bool ForNewChats { get { return on && !blocked; } }
+
+    string MarkerPath { get { return Path.Combine(folder, FileName); } }
+
+    // Only the warning's Turn on button calls this. If the marker can't be written, bypass stays off.
+    internal string TurnOn()
+    {
+        if (blocked) return string.Format(TurnOnFailedText, "this is a test copy");
+        if (!LaptopOnDisk(folder)) return string.Format(TurnOnFailedText, "laptop access is off");
+        try
+        {
+            WidgetFiles.WriteAtomic(MarkerPath, Protect(Marker, Entropy));
+        }
+        catch (Exception e)
+        {
+            if (!(e is IOException || e is UnauthorizedAccessException || e is System.ComponentModel.Win32Exception)) throw;
+            return string.Format(TurnOnFailedText, e.Message);
+        }
+        on = true;
+        clearPending = false;
+        return null;
+    }
+
+    // Memory goes off first, so new chats are normal whatever happens to the file. Null when the file is cleared.
+    internal string TurnOff()
+    {
+        on = false;
+        string reason = Clear();
+        clearPending = reason != null;
+        return reason == null ? null : string.Format(ClearFailedText, reason, FileName);
+    }
+
+    // Before laptop access goes on. Null when bypass is cleared; otherwise why not, and laptop access must stay off.
+    internal string BeforeLaptopOn()
+    {
+        on = false;
+        string reason = Clear();
+        clearPending = reason != null;
+        return reason;
+    }
+
+    // After laptop access goes off. A failed clear is retried later, and bypass can't load on without laptop access.
+    internal void AfterLaptopOff()
+    {
+        TurnOff();
+    }
+
+    // At the next chat start and at exit, after a clear that failed.
+    internal void RetryClear()
+    {
+        if (clearPending && Clear() == null) clearPending = false;
+    }
+
+    // Deletes the file, or failing that overwrites it with "off". Null on success, else the reason.
+    string Clear()
+    {
+        string file = MarkerPath;
+        try
+        {
+            if (File.Exists(file)) File.Delete(file);
+            return null;
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        try
+        {
+            File.WriteAllText(file, "off");
+            return null;
+        }
+        catch (IOException e) { return e.Message.TrimEnd('.'); }
+        catch (UnauthorizedAccessException e) { return e.Message.TrimEnd('.'); }
+    }
+
+    static bool LaptopOnDisk(string dataFolder)
+    {
+        try
+        {
+            string setting = Path.Combine(dataFolder, "chat-access.txt");
+            return File.Exists(setting) && File.ReadAllText(setting).Trim().Equals("laptop", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    internal static bool HasMarker(string dataFolder)
+    {
+        try
+        {
+            string file = Path.Combine(dataFolder, FileName);
+            return File.Exists(file) && Unprotect(File.ReadAllText(file).Trim(), Entropy) == Marker;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    // ---------- DPAPI, P/Invoked from crypt32 so the build needs no new reference ----------
+    [StructLayout(LayoutKind.Sequential)]
+    struct Blob
+    {
+        public int Size;
+        public IntPtr Data;
+    }
+
+    const int UiForbidden = 0x1;
+
+    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CryptProtectData(ref Blob data, string description, ref Blob entropy, IntPtr reserved, IntPtr prompt, int flags, out Blob output);
+
+    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CryptUnprotectData(ref Blob data, IntPtr description, ref Blob entropy, IntPtr reserved, IntPtr prompt, int flags, out Blob output);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr LocalFree(IntPtr memory);
+
+    static Blob Copy(byte[] bytes)
+    {
+        Blob blob = new Blob();
+        blob.Size = bytes.Length;
+        blob.Data = Marshal.AllocHGlobal(Math.Max(1, bytes.Length));
+        Marshal.Copy(bytes, 0, blob.Data, bytes.Length);
+        return blob;
+    }
+
+    static byte[] Take(Blob blob)
+    {
+        byte[] bytes = new byte[blob.Size];
+        Marshal.Copy(blob.Data, bytes, 0, blob.Size);
+        LocalFree(blob.Data);
+        return bytes;
+    }
+
+    // The Base64 of a current-user DPAPI blob. Throws Win32Exception if DPAPI fails.
+    internal static string Protect(string text, string entropy)
+    {
+        Blob data = Copy(Encoding.UTF8.GetBytes(text)), salt = Copy(Encoding.UTF8.GetBytes(entropy)), output;
+        try
+        {
+            if (!CryptProtectData(ref data, "Claude widget bypass", ref salt, IntPtr.Zero, IntPtr.Zero, UiForbidden, out output))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            return Convert.ToBase64String(Take(output));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(data.Data);
+            Marshal.FreeHGlobal(salt.Data);
+        }
+    }
+
+    // The text inside a blob made with this entropy by this Windows user, or null for anything else.
+    internal static string Unprotect(string base64, string entropy)
+    {
+        byte[] raw;
+        try { raw = Convert.FromBase64String(base64); }
+        catch (FormatException) { return null; }
+        if (raw.Length == 0) return null;
+        Blob data = Copy(raw), salt = Copy(Encoding.UTF8.GetBytes(entropy)), output;
+        try
+        {
+            if (!CryptUnprotectData(ref data, IntPtr.Zero, ref salt, IntPtr.Zero, IntPtr.Zero, UiForbidden, out output)) return null;
+            byte[] plain = Take(output);
+            try { return new UTF8Encoding(false, true).GetString(plain); }
+            catch (ArgumentException) { return null; }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(data.Data);
+            Marshal.FreeHGlobal(salt.Data);
+        }
+    }
+}
+
 // Standing instructions the user saves in Settings for new chats, kept verbatim in chat-instructions.txt in the data folder.
 // Reading normalises them; text over the limit isn't used at all, and the caller says so.
 static class ChatInstructions
@@ -1683,6 +1886,11 @@ class WidgetWindow : Window
     AlertState alertState;
     string alertStateText;
     NoticeQueue notices;
+    // Bypass permissions for new chats (chat-bypass.txt). Read once here; after that only memory decides.
+    internal BypassState Bypass;
+    // Tests: lets a test copy load bypass from its data folder. A test copy never does otherwise.
+    internal static bool BypassLoadForTests;
+    internal bool BypassForNewChats { get { return Bypass.ForNewChats; } }
     readonly string historyFile;
     internal Task<bool> historyWrite;
     UsageHistoryWindow historyWindow;
@@ -1712,6 +1920,7 @@ class WidgetWindow : Window
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
         accountFile = accountPath;
+        Bypass = new BypassState(dataDir, testMode && !BypassLoadForTests);
 
         Title = "Claude Account Widget";
         Width = FullWidth;
@@ -1774,6 +1983,8 @@ class WidgetWindow : Window
         pollTimer.Start();
         Loaded += delegate { FetchUsage(false); };
         Closed += delegate { ChatWindow.CloseAll(); };
+        // A turn-off that couldn't delete chat-bypass.txt is tried once more on the way out.
+        Closed += delegate { Bypass.RetryClear(); };
         SourceInitialized += delegate
         {
             System.Windows.Interop.HwndSource source = System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle);
@@ -2109,7 +2320,8 @@ class WidgetWindow : Window
 
     void OpenChatWindow()
     {
-        ChatWindow chat = new ChatWindow(dataFolder);
+        Bypass.RetryClear();
+        ChatWindow chat = new ChatWindow(dataFolder, BypassForNewChats);
         chat.AttachWidget(this);
         if (OffScreenWindows)
         {
@@ -6988,8 +7200,25 @@ class SettingsWindow : Window
         try
         {
             string file = PathOf(AccessName);
-            if (on) WidgetFiles.WriteAtomic(file, "laptop");
-            else if (File.Exists(file)) File.Delete(file);
+            if (on)
+            {
+                // Bypass is cleared before laptop access goes on, so turning it on again always needs the bypass warning.
+                // If the clear fails, laptop access stays off.
+                string blocked = widget.Bypass.BeforeLaptopOn();
+                if (blocked != null)
+                {
+                    ShowMessage("Couldn't change laptop access: " + blocked, true);
+                    ShowSwitches();
+                    return;
+                }
+                WidgetFiles.WriteAtomic(file, "laptop");
+            }
+            else
+            {
+                if (File.Exists(file)) File.Delete(file);
+                // Without laptop access bypass never loads on, so a failed clear here can't matter.
+                widget.Bypass.AfterLaptopOff();
+            }
             laptopOn = on;
             laptopWarning.Visibility = Visibility.Collapsed;
             ShowMessage(on ? "Laptop access is on for new chats." : "Laptop access is off for new chats.", false);
@@ -7542,6 +7771,8 @@ class ChatWindow : Window
 
     readonly string historyFolder;
     readonly bool laptopAccess;
+    // This chat's mode: the widget's in-memory bypass when the window opened AND this window's own read of laptop access.
+    bool bypassMode;
     ChatNoteWriter noteWriter;
     readonly List<ChatTurn> turns = new List<ChatTurn>();
     readonly List<Border> bubbles = new List<Border>();
@@ -7693,11 +7924,12 @@ class ChatWindow : Window
         instructionsHint.Visibility = instructionsHint.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    public ChatWindow(string dataFolder)
+    public ChatWindow(string dataFolder, bool bypass = false)
     {
         settingsFolder = dataFolder;
         historyFolder = ReadHistoryFolder(dataFolder);
         laptopAccess = ReadLaptopAccess(dataFolder);
+        bypassMode = bypass && laptopAccess;
         readFolders = ReadExtraFolders(dataFolder);
         optionsFile = Path.Combine(dataFolder, "chat-options.txt");
         outputSettingFile = Path.Combine(dataFolder, "chat-output-folder.txt");
@@ -10401,6 +10633,7 @@ class ChatWindow : Window
         request.Prompt = prompt;
         request.MemoryFolder = historyFolder;
         request.Laptop = laptopAccess;
+        request.Bypass = bypassMode;
         request.WidgetFolder = settingsFolder;
         request.Model = modelChoice;
         request.Effort = effortChoice;
