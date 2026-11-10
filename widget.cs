@@ -5788,6 +5788,10 @@ class ChatClient
         Dictionary<string, object> target = new Dictionary<string, object>();
         target["file_path"] = path;
         if (SignInGuard.Check(tool, target, null) != GuardResult.Clear) return false;
+        // A protected target (the widget's own folder with settings.txt and chat-bypass.txt, Startup, git hooks, .vscode
+        // and the rest of ProtectedTargets, resolved as the guard resolves paths) always gets a card, even inside the
+        // chosen output folder.
+        if (ProtectedTargets.Matches(tool, target, Context())) return false;
         if (!IsInside(path, folder) || PassesThroughLink(path, folder)) return false;
         return !string.Equals(Path.GetFileName(path), "desktop.ini", StringComparison.OrdinalIgnoreCase);
     }

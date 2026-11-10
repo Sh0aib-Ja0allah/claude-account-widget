@@ -1921,6 +1921,8 @@ static class H3
         await BypassChats();
         await MovedWrites();
         await MovedNormal();
+        await WidgetFolderOut();
+        await ProtectedOut();
     }
 
     // ---------- C-B10 to 18: a bypass chat (laptop access plus Bypass), set directly; there's no switch yet ----------
@@ -2090,6 +2092,147 @@ static class H3
         }
         finally
         {
+            permShape = null;
+            SignInGuard.HomeOverride = null;
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern uint GetShortPathNameW(string path, StringBuilder shortPath, int size);
+
+    static string ShortName(string path)
+    {
+        StringBuilder sb = new StringBuilder(1024);
+        uint n = GetShortPathNameW(path, sb, sb.Capacity);
+        return n > 0 && n < sb.Capacity ? sb.ToString() : path;
+    }
+
+    static bool MakeJunction(string link, string target)
+    {
+        System.Diagnostics.ProcessStartInfo info = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c mklink /J \"" + link + "\" \"" + target + "\"");
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        info.RedirectStandardOutput = true;
+        using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(info)) { p.StandardOutput.ReadToEnd(); p.WaitForExit(); }
+        return Directory.Exists(link);
+    }
+
+    // C-B24 (o1-widget-folder): the widget's own folder as the chosen output folder never skips a card, in a normal or a
+    // bypass chat, whether it's named plainly, by its 8.3 name or through a junction. An ordinary chosen folder still does.
+    static async Task WidgetFolderOut()
+    {
+        string defaultOut = Path.Combine(root, "perm-out4"), ordinary = Path.Combine(root, "perm-chosen4");
+        string widgetFolder = Path.Combine(root, "widget data folder for o1");
+        Directory.CreateDirectory(defaultOut);
+        Directory.CreateDirectory(ordinary);
+        Directory.CreateDirectory(widgetFolder);
+        string declined = (string)typeof(PermissionDecision).GetField("DeclinedMessage", Any).GetValue(null);
+        string junction = Path.Combine(root, "o1-junction");
+        bool joined = MakeJunction(junction, widgetFolder);
+        string shortName = ShortName(widgetFolder);
+        var forms = new List<KeyValuePair<string, string>> { new KeyValuePair<string, string>("named plainly", widgetFolder) };
+        if (shortName != widgetFolder) forms.Add(new KeyValuePair<string, string>("by its 8.3 name", shortName));
+        else Log("SKIP C-B24 8.3 names are off on this volume, so there's no short name to test");
+        if (joined) forms.Add(new KeyValuePair<string, string>("through a junction", junction));
+        else Check("C-B24 the junction to the widget folder could be made", false);
+        SignInGuard.HomeOverride = permHome;
+        try
+        {
+            foreach (bool bypass in new[] { false, true })
+            {
+                permBypass = bypass;
+                string mode = bypass ? "bypass" : "normal";
+                foreach (KeyValuePair<string, string> form in forms)
+                {
+                    string chosen = form.Value;
+                    permShape = delegate(ChatRequest req)
+                    {
+                        req.WidgetFolder = widgetFolder;
+                        req.DefaultOutputFolder = defaultOut;
+                        req.CurrentOutputFolder = delegate { return chosen; };
+                        req.ResolveOutputFolder = delegate { return Task.FromResult(chosen); };
+                        return req;
+                    };
+                    List<string> cards = new List<string>();
+                    List<Dictionary<string, object>> replies = await Asked(cards, false,
+                        "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, "moved.txt")) + ",\"content\":\"x\"}",
+                        "Write", "{\"file_path\":" + Q(Path.Combine(chosen, "direct.txt")) + ",\"content\":\"x\"}");
+                    Check("C-B24 " + mode + " chat: the widget's folder " + form.Key + " as the output folder: a moved write and a direct write each get a card",
+                        All(replies, 2, "deny", declined) && cards.SequenceEqual(new[] { "Write", "Write" }), Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+                }
+            }
+            permBypass = false;
+            permShape = delegate(ChatRequest req)
+            {
+                req.WidgetFolder = widgetFolder;
+                req.DefaultOutputFolder = defaultOut;
+                req.CurrentOutputFolder = delegate { return ordinary; };
+                req.ResolveOutputFolder = delegate { return Task.FromResult(ordinary); };
+                return req;
+            };
+            List<string> plainCards = new List<string>();
+            List<Dictionary<string, object>> plain = await Asked(plainCards, false, "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, "plain.txt")) + ",\"content\":\"x\"}");
+            Check("C-B24 normal chat: an ordinary chosen output folder still needs no card", All(plain, 1, "allow") && plainCards.Count == 0, Show(plain));
+        }
+        finally
+        {
+            permBypass = false;
+            permShape = null;
+            SignInGuard.HomeOverride = null;
+            try { if (joined) Directory.Delete(junction); } catch (IOException) { }
+        }
+    }
+
+    // C-B25 (o1, the PE's wider scope): any protected target as the chosen output folder, or a protected file name moved
+    // into an ordinary one, never skips a card, in a normal or a bypass chat. The fake claude writes nothing.
+    static async Task ProtectedOut()
+    {
+        string defaultOut = Path.Combine(root, "perm-out5"), ordinary = Path.Combine(root, "perm-chosen5");
+        Directory.CreateDirectory(defaultOut);
+        Directory.CreateDirectory(ordinary);
+        foreach (string sub in new[] { Path.Combine(".git", "hooks"), ".vscode", ".idea", ".husky", ".devcontainer" }) Directory.CreateDirectory(Path.Combine(permProj, sub));
+        Directory.CreateDirectory(Path.Combine(permHome, ".claude"));
+        string declined = (string)typeof(PermissionDecision).GetField("DeclinedMessage", Any).GetValue(null);
+        string startup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        // { label, chosen folder, file name written into the default folder }
+        string[][] targets = {
+            new[] { "the Startup folder", startup, "o1.txt" },
+            new[] { "a git hooks folder", Path.Combine(permProj, ".git", "hooks"), "pre-commit" },
+            new[] { "a .vscode folder", Path.Combine(permProj, ".vscode"), "settings.json" },
+            new[] { "a .idea folder", Path.Combine(permProj, ".idea"), "workspace.xml" },
+            new[] { "a .husky folder", Path.Combine(permProj, ".husky"), "pre-push" },
+            new[] { "a .devcontainer folder", Path.Combine(permProj, ".devcontainer"), "devcontainer.json" },
+            new[] { "the decoy home's .claude folder", Path.Combine(permHome, ".claude"), "settings.json" },
+            new[] { "an ordinary folder, as .gitconfig", ordinary, ".gitconfig" },
+            new[] { "an ordinary folder, as .npmrc", ordinary, ".npmrc" },
+            new[] { "an ordinary folder, as a PowerShell profile.ps1", ordinary, "Microsoft.PowerShell_profile.ps1" },
+        };
+        SignInGuard.HomeOverride = permHome;
+        try
+        {
+            foreach (bool bypass in new[] { false, true })
+            {
+                permBypass = bypass;
+                foreach (string[] t in targets)
+                {
+                    string chosen = t[1];
+                    permShape = delegate(ChatRequest req)
+                    {
+                        req.DefaultOutputFolder = defaultOut;
+                        req.CurrentOutputFolder = delegate { return chosen; };
+                        req.ResolveOutputFolder = delegate { return Task.FromResult(chosen); };
+                        return req;
+                    };
+                    List<string> cards = new List<string>();
+                    List<Dictionary<string, object>> replies = await Asked(cards, false, "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, t[2])) + ",\"content\":\"x\"}");
+                    Check("C-B25 " + (bypass ? "bypass" : "normal") + " chat: a write moved by the output folder into " + t[0] + " gets a card",
+                        All(replies, 1, "deny", declined) && cards.SequenceEqual(new[] { "Write" }), Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+                }
+            }
+        }
+        finally
+        {
+            permBypass = false;
             permShape = null;
             SignInGuard.HomeOverride = null;
         }
