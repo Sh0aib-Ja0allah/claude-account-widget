@@ -1923,6 +1923,7 @@ static class H3
         await MovedNormal();
         await WidgetFolderOut();
         await ProtectedOut();
+        await BypassWindow();
     }
 
     // ---------- C-B10 to 18: a bypass chat (laptop access plus Bypass), set directly; there's no switch yet ----------
@@ -2236,5 +2237,48 @@ static class H3
             permShape = null;
             SignInGuard.HomeOverride = null;
         }
+    }
+
+    // C-B20 to 22 (u3-chip): a real chat window in bypass mode, through the fake claude.
+    static async Task BypassWindow()
+    {
+        string d = Path.Combine(root, "cb20-data");
+        Directory.CreateDirectory(d);
+        File.WriteAllText(Path.Combine(d, "chat-access.txt"), "laptop");
+        File.WriteAllText(Path.Combine(d, BypassState.FileName), BypassState.Protect(BypassState.Marker, BypassState.Entropy));
+        string outDir = Path.Combine(root, "cb20-out");
+        Directory.CreateDirectory(outDir);
+        ChatWindow w = new ChatWindow(d, true);
+        w.ShowActivated = false; w.Left = -6000; w.Top = 50; w.Width = 396; w.Height = 536;
+        w.Show();
+        try
+        {
+            Script(Sys, Ask("Write", "{\"file_path\":" + Q(Path.Combine(outDir, "a.txt")) + ",\"content\":\"x\"}", 1), "#read", Result("done"));
+            int before = FakeLines("REPLY ").Count;
+            await SendNow(w, "write a");
+            List<string> first = FakeLines("REPLY ").Skip(before).ToList();
+            Border chip = (Border)Get(w, "bypassChip");
+            Check("C-B20 a chat window opened in bypass shows the chip, and its Write is allowed with no card",
+                w.BypassMode && chip.Visibility == Visibility.Visible && first.Count == 1 && first[0].Contains("\"behavior\":\"allow\""), string.Join(" | ", first.ToArray()));
+
+            BypassState state = new BypassState(d, false);
+            string off = state.TurnOff();
+            Script(Sys, Ask("Write", "{\"file_path\":" + Q(Path.Combine(outDir, "b.txt")) + ",\"content\":\"x\"}", 2), "#read", Result("done"));
+            before = FakeLines("REPLY ").Count;
+            await SendNow(w, "write b");
+            List<string> second = FakeLines("REPLY ").Skip(before).ToList();
+            Check("C-B21 after bypass is turned off, the open chat keeps bypass: the chip stays and its next Write still needs no card",
+                off == null && !File.Exists(Path.Combine(d, BypassState.FileName)) && w.BypassMode && chip.Visibility == Visibility.Visible
+                && second.Count == 1 && second[0].Contains("\"behavior\":\"allow\""), string.Join(" | ", second.ToArray()));
+
+            ChatWindow fresh = new ChatWindow(d, state.ForNewChats);
+            fresh.ShowActivated = false; fresh.Left = -6000; fresh.Top = 50; fresh.Width = 396; fresh.Height = 536;
+            fresh.Show();
+            Check("C-B22 a new chat after turning off is normal: no chip and the asking footer",
+                !fresh.BypassMode && ((Border)Get(fresh, "bypassChip")).Visibility == Visibility.Collapsed
+                && ((TextBlock)Get(fresh, "saveNote")).Text.EndsWith(" Asks before changes or commands."));
+            fresh.Close();
+        }
+        finally { w.Close(); }
     }
 }

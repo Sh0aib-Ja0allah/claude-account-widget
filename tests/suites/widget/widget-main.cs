@@ -102,7 +102,7 @@ static partial class H4
                 if (section == "switch") await Switches();
                 if (section == "notes") await Notes();
                 if (section == "c3d") await SidebarMenu();
-                if (section == "bypass") await BypassSwitch();
+                if (section == "bypass") { await BypassSwitch(); await BypassChip(); }
             }
             catch (Exception e) { Log("SECTION ERROR " + section + " " + e); fails++; }
         }

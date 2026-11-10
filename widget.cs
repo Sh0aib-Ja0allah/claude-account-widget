@@ -1988,6 +1988,7 @@ class WidgetWindow : Window
         pollTimer.Tick += delegate { FetchUsage(false); };
         pollTimer.Start();
         Loaded += delegate { FetchUsage(false); };
+        Loaded += delegate { AnnounceBypass(); };
         Closed += delegate { ChatWindow.CloseAll(); };
         // A turn-off that couldn't delete chat-bypass.txt is tried once more on the way out.
         Closed += delegate { Bypass.RetryClear(); };
@@ -3350,6 +3351,20 @@ class WidgetWindow : Window
         if (notice == null || !alertsOn || ShowNotice == null) return;
         if (notices == null) notices = new NoticeQueue(ShowNotice);
         notices.Enqueue(notice[0], notice[1]);
+    }
+
+    internal const string BypassNoticeTitle = "Bypass permissions are on";
+    internal const string BypassNoticeText = "New chats will edit files, run commands and open sites without asking. If you didn't turn this on, turn it off in Settings.";
+    bool bypassAnnounced;
+
+    // Once per widget start, when bypass loaded on from chat-bypass.txt, so a marker that came back without the user is
+    // seen. Turning it on in Settings during the run doesn't announce it. Test copies log it through TestNotices.
+    void AnnounceBypass()
+    {
+        if (bypassAnnounced || !Bypass.LoadedOn || ShowNotice == null) return;
+        bypassAnnounced = true;
+        if (notices == null) notices = new NoticeQueue(ShowNotice);
+        notices.Enqueue(BypassNoticeTitle, BypassNoticeText);
     }
 
     // A click on a notice brings the full card forward.
@@ -7364,6 +7379,8 @@ class SettingsWindow : Window
         bypassSwitch.IsEnabled = bypassAvailable;
         bypassSwitch.Opacity = bypassAvailable ? 1 : 0.4;
         bypassSwitch.ToolTip = blocked ? "Not available in a test copy" : laptopOn ? BypassTitle : "Turn on laptop access first";
+        // WPF hides a disabled element's tooltip unless told otherwise, and the disabled state is when it explains why.
+        ToolTipService.SetShowOnDisabled(bypassSwitch, true);
         ShowSwitch(alertsSwitch, alertsKnob, widget.alertsOn);
         ShowSwitch(updateSwitch, updateKnob, widget.updateCheckOn);
     }
@@ -7852,6 +7869,9 @@ class ChatWindow : Window
     const string SavedNote = "Saved to your chat history folder. Remembers saved chats.";
     const string UnsavedNote = "Not being saved. Can't recall other chats.";
     const string LaptopNote = " Reads your files. Asks before changes or commands.";
+    internal const string BypassNote = " Reads your files. Changes and commands run without asking.";
+    internal const string BypassChipTip = "This chat edits files, runs commands and opens sites without asking. Sign-in files are refused by name; scripts can get past that. New chats follow Settings; this chat keeps its mode.";
+    internal const string BypassChipName = "Bypass permissions on for this chat";
     const string SecondBrainNote = "Can read your chat history and chosen folders.";
     const string SaveFailedNote = "Couldn't save the last reply. This chat keeps working, but it isn't saved.";
 
@@ -7931,6 +7951,8 @@ class ChatWindow : Window
     readonly SolidColorBrush sendGlyph = new SolidColorBrush();
     readonly SolidColorBrush composerEdge = new SolidColorBrush();
     readonly SolidColorBrush warningText = new SolidColorBrush();
+    readonly Border bypassChip = new Border();
+    readonly SolidColorBrush bypassFill = new SolidColorBrush();
 
     readonly Border cardBorder = new Border();
     readonly DropShadowEffect cardShadow = new DropShadowEffect();
@@ -8364,6 +8386,23 @@ class ChatWindow : Window
         WidgetWindow.BuildHeaderButton(minimizeButton, minimizeIcon, "\uE921", "Minimize", 2);
         MakeButton(minimizeButton, delegate { WindowState = WindowState.Minimized; });
 
+        // A clear amber marker for as long as this chat is in bypass mode.
+        TextBlock bypassText = new TextBlock();
+        bypassText.Text = "Bypass on";
+        bypassText.FontSize = 11;
+        bypassText.FontWeight = FontWeights.SemiBold;
+        bypassText.Foreground = warningText;
+        bypassChip.Child = bypassText;
+        bypassChip.CornerRadius = new CornerRadius(8);
+        bypassChip.Padding = new Thickness(8, 2, 8, 3);
+        bypassChip.Margin = new Thickness(6, -2, 6, -2);
+        bypassChip.VerticalAlignment = VerticalAlignment.Center;
+        bypassChip.Background = bypassFill;
+        bypassChip.ToolTip = BypassChipTip;
+        System.Windows.Automation.AutomationProperties.SetName(bypassChip, BypassChipName);
+        DockPanel.SetDock(bypassChip, Dock.Right);
+        ShowBypassMode();
+
         chatTitle.Text = "New chat";
         chatTitle.FontSize = 13;
         chatTitle.FontWeight = FontWeights.SemiBold;
@@ -8381,6 +8420,7 @@ class ChatWindow : Window
         header.Children.Add(closeButton);
         header.Children.Add(extendButton);
         header.Children.Add(minimizeButton);
+        header.Children.Add(bypassChip);
         header.Children.Add(historyToggle);
         header.Children.Add(headerSpark);
         header.Children.Add(BuildTitleArea());
@@ -9093,10 +9133,24 @@ class ChatWindow : Window
         ClearConversation();
         if (historyFolder != null) noteWriter = new ChatNoteWriter(historyFolder);
         TakeInstructions();
+        // A new chat in this window follows Settings only downwards: bypass that was turned off ends here, and bypass
+        // turned on since never starts in a window opened without it.
+        if (bypassMode && widget != null && !widget.BypassForNewChats)
+        {
+            bypassMode = false;
+            ShowBypassMode();
+        }
         chatTitle.Text = "New chat";
         ShowSaveState(true);
         UpdateHistoryPanel();
         input.Focus();
+    }
+
+    internal bool BypassMode { get { return bypassMode; } }
+
+    void ShowBypassMode()
+    {
+        bypassChip.Visibility = bypassMode ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // Continues a saved chat here, or switches to the window that already has it open,
@@ -10519,6 +10573,7 @@ class ChatWindow : Window
             previewPane.ReloadForTheme();
         }
         warningText.Color = WidgetWindow.Hex(light ? "#8F5700" : "#E5B454");
+        bypassFill.Color = WidgetWindow.Hex(light ? "#24B26F12" : "#2EE5B454");
         sidebarFill.Color = WidgetWindow.Hex(light ? "#0A000000" : "#33000000");
         composerEdge.Color = input.IsKeyboardFocused ? WidgetWindow.Muted.Color : WidgetWindow.CardEdge.Color;
 
@@ -10556,7 +10611,7 @@ class ChatWindow : Window
         else
         {
             saveNote.Text = noteWriter != null && readFolders.Count > 0 ? SecondBrainNote
-                : (noteWriter != null ? SavedNote : UnsavedNote) + (laptopAccess ? LaptopNote : "");
+                : (noteWriter != null ? SavedNote : UnsavedNote) + (bypassMode ? BypassNote : laptopAccess ? LaptopNote : "");
             saveNote.Foreground = WidgetWindow.Muted;
         }
         UpdateTopBar();

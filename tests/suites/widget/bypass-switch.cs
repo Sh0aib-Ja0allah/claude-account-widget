@@ -68,7 +68,8 @@ static partial class H4
         bool hint = TextBlocksIn(sw).Any(t => t.Text == "New chats edit files, run commands and open sites without asking. Needs laptop access. Sign-in files are refused by name, which scripts can get past.");
         Check("W-B01 the switch row has the exact title and hint", hint && TextBlocksIn(sw).Any(t => t.Text == "Bypass permissions for chats")
             && System.Windows.Automation.AutomationProperties.GetName(track) == "Bypass permissions for chats");
-        Check("W-B02 without laptop access the switch is greyed out with its tooltip", !track.IsEnabled && track.Opacity < 1 && (string)track.ToolTip == "Turn on laptop access first");
+        Check("W-B02 without laptop access the switch is greyed out with its tooltip, which shows while it's disabled",
+            !track.IsEnabled && track.Opacity < 1 && (string)track.ToolTip == "Turn on laptop access first" && ToolTipService.GetShowOnDisabled(track));
         Call(sw, "ToggleBypass");
         Check("W-B02 without laptop access a click says so and changes nothing",
             SettingsMessage(sw) == "Turn on laptop access first." && !w.BypassForNewChats && warning.Visibility == Visibility.Collapsed && !File.Exists(BypassFile(d)));
@@ -81,7 +82,7 @@ static partial class H4
         Border copyTrack = (Border)Get(cs, "bypassSwitch");
         Call(cs, "ToggleBypass");
         Check("W-B03 in a test copy the switch is greyed out, says why, and a click changes nothing",
-            !copyTrack.IsEnabled && (string)copyTrack.ToolTip == "Not available in a test copy" && SettingsMessage(cs) == "Bypass permissions aren't available in a test copy."
+            !copyTrack.IsEnabled && (string)copyTrack.ToolTip == "Not available in a test copy" && ToolTipService.GetShowOnDisabled(copyTrack) && SettingsMessage(cs) == "Bypass permissions aren't available in a test copy."
             && !copy.BypassForNewChats && ((Border)Get(cs, "bypassWarning")).Visibility == Visibility.Collapsed && !File.Exists(BypassFile(dc)));
         cs.Close(); copy.Close();
 
@@ -214,5 +215,136 @@ static partial class H4
         Check("W-B20 after that failed turn-off and a restart, bypass is honestly shown on", w.BypassForNewChats && KnobOn(sw));
         PressBorder((Border)Get(sw, "bypassSwitch"));
         sw.Close(); w.Close();
+    }
+
+    // ---------- W-B30 to 44 (u3-chip): the chat chip, New chat lowering the mode (DEC-19), the start-up notice (DEC-21) ----------
+    static ChatWindow ChipChat(string d, bool bypass)
+    {
+        ChatWindow c = new ChatWindow(d, bypass);
+        c.ShowActivated = false; c.ShowInTaskbar = false; c.Left = -6000; c.Top = 50; c.Width = 396; c.Height = 536;
+        c.Show();
+        c.UpdateLayout();
+        return c;
+    }
+
+    static bool ChipShown(ChatWindow c) { return ((Border)Get(c, "bypassChip")).Visibility == Visibility.Visible; }
+    static string Footer(ChatWindow c) { return ((TextBlock)Get(c, "saveNote")).Text; }
+    static void ValidMarker(string d) { File.WriteAllText(BypassFile(d), BypassState.Protect(BypassState.Marker, BypassState.Entropy)); }
+
+    static async Task<List<string>> NoticeLines(string log, int waitMs)
+    {
+        for (int i = 0; i < waitMs / 50; i++)
+        {
+            if (File.Exists(log) && File.ReadAllLines(log).Length > 0) break;
+            await Task.Delay(50);
+        }
+        await Task.Delay(200);
+        return File.Exists(log) ? File.ReadAllLines(log).ToList() : new List<string>();
+    }
+
+    static WidgetWindow NoticeWidget(string d, string log)
+    {
+        WidgetWindow w = BypassWidget(d);
+        w.ShowNotice = TestNotices.Writer(log);
+        w.ShowActivated = false; w.ShowInTaskbar = false; w.Left = -6000;
+        w.Show();
+        return w;
+    }
+
+    static async Task BypassChip()
+    {
+        // W-B30 to 34: the chip and the footer
+        string d = Fresh("wb-chip");
+        File.WriteAllText(Path.Combine(d, "chat-access.txt"), "laptop");
+        string dn = Fresh("wb-chip-nolaptop");
+        ChatWindow bypassChat = ChipChat(d, true), normalChat = ChipChat(d, false), noLaptop = ChipChat(dn, true);
+        Check("W-B30 the chip shows only in a bypass chat: not in a normal one, nor when the chat's own laptop access is off",
+            ChipShown(bypassChat) && bypassChat.BypassMode && !ChipShown(normalChat) && !normalChat.BypassMode && !ChipShown(noLaptop) && !noLaptop.BypassMode);
+        WidgetWindow tw = NewWidget(Fresh("wb-chip-theme"), true);
+        ThemeOf(tw, "light");
+        Color light = ((SolidColorBrush)Get(bypassChat, "bypassFill")).Color, lightText = ((SolidColorBrush)Get(bypassChat, "warningText")).Color;
+        ThemeOf(tw, "dark");
+        Color dark = ((SolidColorBrush)Get(bypassChat, "bypassFill")).Color, darkText = ((SolidColorBrush)Get(bypassChat, "warningText")).Color;
+        Check("W-B31 the chip is amber in both themes", light == WidgetWindow.Hex("#24B26F12") && dark == WidgetWindow.Hex("#2EE5B454")
+            && lightText == WidgetWindow.Hex("#8F5700") && darkText == WidgetWindow.Hex("#E5B454"), light + " " + dark);
+        tw.Close();
+        Border chip = (Border)Get(bypassChat, "bypassChip");
+        Check("W-B32 the chip's automation name is exact, and it reads Bypass on",
+            System.Windows.Automation.AutomationProperties.GetName(chip) == "Bypass permissions on for this chat" && ((TextBlock)chip.Child).Text == "Bypass on");
+        Check("W-B33 the chip's tooltip is exact (DEC-9)", (string)chip.ToolTip == "This chat edits files, runs commands and opens sites without asking. Sign-in files are refused by name; scripts can get past that. New chats follow Settings; this chat keeps its mode.");
+        Check("W-B34 the footer says changes and commands run without asking in a bypass chat, and asks in a normal one",
+            Footer(bypassChat).EndsWith(" Reads your files. Changes and commands run without asking.") && Footer(normalChat).EndsWith(" Reads your files. Asks before changes or commands."),
+            Footer(bypassChat) + " | " + Footer(normalChat));
+        bypassChat.Close(); normalChat.Close(); noLaptop.Close();
+
+        // W-B35 to 39: the mode for the chat's life, and New chat (DEC-19)
+        d = Fresh("wb-mode");
+        File.WriteAllText(Path.Combine(d, "chat-access.txt"), "laptop");
+        ValidMarker(d);
+        WidgetWindow w = BypassWidget(d);
+        ChatWindow open = ChipChat(d, w.BypassForNewChats);
+        open.AttachWidget(w);
+        ChatWindow normal = ChipChat(d, false);
+        normal.AttachWidget(w);
+        Call(open, "StartNewChat");
+        Check("W-B38 bypass still on, then New chat: the chat stays in bypass", open.BypassMode && ChipShown(open));
+        w.Bypass.TurnOff();
+        Check("W-B35 turning bypass off leaves an open bypass chat in bypass, with its chip", open.BypassMode && ChipShown(open));
+        open.UpdateLayout();
+        Check("W-B36 the mode changes only at New chat: until then the chip and footer stay", ChipShown(open) && Footer(open).EndsWith(" Changes and commands run without asking."));
+        Call(open, "StartNewChat");
+        Check("W-B37 bypass turned off, then New chat in that window: a normal chat, with no chip and the normal footer",
+            !open.BypassMode && !ChipShown(open) && Footer(open).EndsWith(" Asks before changes or commands."), Footer(open));
+        w.Bypass.TurnOn();
+        Call(normal, "StartNewChat");
+        Call(open, "StartNewChat");
+        Check("W-B39 bypass turned on later, then New chat: windows opened or lowered to normal stay normal (never raised)",
+            w.BypassForNewChats && !normal.BypassMode && !ChipShown(normal) && !open.BypassMode && !ChipShown(open));
+        open.Close(); normal.Close();
+        w.Bypass.TurnOff();
+        w.Close();
+
+        // W-B40 to 44: the start-up notice
+        d = Fresh("wb-notice");
+        File.WriteAllText(Path.Combine(d, "chat-access.txt"), "laptop");
+        ValidMarker(d);
+        string log = Path.Combine(d, "notices-1.log");
+        WidgetWindow nw = NoticeWidget(d, log);
+        List<string> lines = await NoticeLines(log, 3000);
+        Call(nw, "AnnounceBypass");
+        await Task.Delay(300);
+        lines = File.Exists(log) ? File.ReadAllLines(log).ToList() : new List<string>();
+        string[] parts = lines.Count == 1 ? lines[0].Split('\t') : new string[0];
+        Check("W-B40 bypass loading on at start gives exactly one notice, with the exact title and text",
+            lines.Count == 1 && parts.Length == 3 && parts[1] == "Bypass permissions are on"
+            && parts[2] == "New chats will edit files, run commands and open sites without asking. If you didn't turn this on, turn it off in Settings.", string.Join(" | ", lines.ToArray()));
+        nw.Close();
+        string log2 = Path.Combine(d, "notices-2.log");
+        nw = NoticeWidget(d, log2);
+        List<string> again = await NoticeLines(log2, 3000);
+        Check("W-B43 the next widget start with the marker still valid gives one notice again", again.Count == 1 && again[0].Contains("\tBypass permissions are on\t"), string.Join(" | ", again.ToArray()));
+        nw.Close();
+
+        string doff = Fresh("wb-notice-off");
+        File.WriteAllText(Path.Combine(doff, "chat-access.txt"), "laptop");
+        string logOff = Path.Combine(doff, "notices.log");
+        WidgetWindow offWidget = NoticeWidget(doff, logOff);
+        List<string> none = await NoticeLines(logOff, 800);
+        Check("W-B41 bypass off at start: no notice", none.Count == 0 && !offWidget.BypassForNewChats, string.Join(" | ", none.ToArray()));
+        string turnedOn = offWidget.Bypass.TurnOn();
+        Call(offWidget, "AnnounceBypass");
+        List<string> later = await NoticeLines(logOff, 800);
+        Check("W-B42 bypass turned on during the run gives no start-up notice", turnedOn == null && offWidget.BypassForNewChats && later.Count == 0, string.Join(" | ", later.ToArray()));
+        offWidget.Bypass.TurnOff();
+        offWidget.Close();
+
+        string dplain = Fresh("wb-notice-plain");
+        File.WriteAllText(Path.Combine(dplain, "chat-access.txt"), "laptop");
+        File.WriteAllText(BypassFile(dplain), BypassState.Marker);
+        string logPlain = Path.Combine(dplain, "notices.log");
+        WidgetWindow plain = NoticeWidget(dplain, logPlain);
+        List<string> plainLines = await NoticeLines(logPlain, 800);
+        Check("W-B44 a plain-text marker: bypass off and no notice", !plain.BypassForNewChats && plainLines.Count == 0, string.Join(" | ", plainLines.ToArray()));
+        plain.Close();
     }
 }
