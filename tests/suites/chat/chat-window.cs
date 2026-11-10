@@ -1920,6 +1920,7 @@ static class H3
         finally { SignInGuard.HomeOverride = null; }
         await BypassChats();
         await MovedWrites();
+        await MovedNormal();
     }
 
     // ---------- C-B10 to 18: a bypass chat (laptop access plus Bypass), set directly; there's no switch yet ----------
@@ -2046,6 +2047,50 @@ static class H3
             permShape = null;
             permBypass = false;
             SignInGuard.OpenLogForTests = null;
+            SignInGuard.HomeOverride = null;
+        }
+    }
+
+    // C-B23 (Worker A's LOW on b1b): in a normal chat, a write the output folder moves onto a sign-in file is refused with
+    // the sign-in message, with no card; an ordinary moved write still needs no card.
+    static async Task MovedNormal()
+    {
+        string defaultOut = Path.Combine(root, "perm-out3"), chosen = Path.Combine(root, "perm-chosen3");
+        Directory.CreateDirectory(defaultOut);
+        Directory.CreateDirectory(chosen);
+        string signIn = (string)typeof(PermissionDecision).GetField("SignInMessage", Any).GetValue(null);
+        SignInGuard.HomeOverride = permHome;
+        try
+        {
+            string folder = Path.Combine(permHome, ".claude");
+            Directory.CreateDirectory(folder);
+            permShape = delegate(ChatRequest req)
+            {
+                req.DefaultOutputFolder = defaultOut;
+                req.CurrentOutputFolder = delegate { return folder; };
+                req.ResolveOutputFolder = delegate { return Task.FromResult(folder); };
+                return req;
+            };
+            List<string> cards = new List<string>();
+            List<Dictionary<string, object>> replies = await Asked(cards, true, "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, ".credentials.json")) + ",\"content\":\"x\"}");
+            Check("C-B23 normal chat: a write the output folder moves onto the decoy sign-in file is refused with the sign-in message, with no card",
+                All(replies, 1, "deny", signIn) && cards.Count == 0, Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+            permShape = delegate(ChatRequest req)
+            {
+                req.DefaultOutputFolder = defaultOut;
+                req.CurrentOutputFolder = delegate { return chosen; };
+                req.ResolveOutputFolder = delegate { return Task.FromResult(chosen); };
+                return req;
+            };
+            cards.Clear();
+            replies = await Asked(cards, false, "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, "plain.txt")) + ",\"content\":\"x\"}");
+            List<string> moved = replies.Where(x => x.ContainsKey("updatedInput")).Select(x => (string)((Dictionary<string, object>)x["updatedInput"])["file_path"]).ToList();
+            Check("C-B23 normal chat: an ordinary write moved to the chosen folder is still allowed with no card",
+                All(replies, 1, "allow") && cards.Count == 0 && moved.Count == 1 && moved[0].StartsWith(chosen + "\\"), Show(replies));
+        }
+        finally
+        {
+            permShape = null;
             SignInGuard.HomeOverride = null;
         }
     }

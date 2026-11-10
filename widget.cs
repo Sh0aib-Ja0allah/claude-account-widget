@@ -5651,15 +5651,24 @@ class ChatClient
                 if (tool == "Bash" || tool == "PowerShell") await PrepareForCommand(input);
                 outcome = JudgeAgain(tool, input, judged, bypass, outcome, ref refusal, ref unresolved);
             }
+            bool inOutputFolder = false;
+            if (outcome == PermissionOutcome.Card && !bypass && !unresolved)
+            {
+                // Normal chats only: a write in the output folder needs no card (AllowInOutputFolder says no to any path,
+                // moved or not, that the guard doesn't clear). A write it moved is judged again where it landed, so one
+                // moved onto a sign-in file is refused. In bypass, a card is for a protected or unresolved target, which
+                // the output folder never skips.
+                inOutputFolder = await AllowInOutputFolder(tool, input);
+                PermissionOutcome moved = JudgeAgain(tool, input, judged, bypass, outcome, ref refusal, ref unresolved);
+                if (moved != outcome || unresolved) inOutputFolder = false;
+                outcome = moved;
+            }
             if (outcome == PermissionOutcome.Allow)
             {
                 allow = !stopRequested;
             }
-            else if (outcome == PermissionOutcome.Card && !bypass && !unresolved && await AllowInOutputFolder(tool, input))
+            else if (outcome == PermissionOutcome.Card && inOutputFolder)
             {
-                // Normal chats only: a write in the output folder needs no card (AllowInOutputFolder says no to any path,
-                // moved or not, that the guard doesn't clear). In bypass, a card is for a protected or unresolved target,
-                // which the output folder never skips.
                 allow = true;
             }
             else if (outcome == PermissionOutcome.Card && !stopRequested)
