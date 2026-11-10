@@ -192,18 +192,6 @@ static class H17
         return t;
     }
 
-    // Reads a file the widget holds open for a live request, sharing write as Claude Code does.
-    static string ReadShared(string path)
-    {
-        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (StreamReader r = new StreamReader(f, new UTF8Encoding(false))) return r.ReadToEnd();
-    }
-
-    static byte[] ReadSharedBytes(string path)
-    {
-        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (MemoryStream m = new MemoryStream()) { f.CopyTo(m); return m.ToArray(); }
-    }
 
     static void Launch()
     {
@@ -275,7 +263,7 @@ static class H17
         string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
         Check("H17-14 the file is in %TEMP%\\ClaudeAccountWidget-chat with a fresh name", Path.GetDirectoryName(written) == folder && Path.GetExtension(written) == ".txt"
             && Path.GetFileNameWithoutExtension(written).Length == 32, written);
-        byte[] bytes = ReadSharedBytes(written);
+        byte[] bytes = File.ReadAllBytes(written);
         Check("H17-14 UTF-8 without a byte order mark, holding the text", bytes[0] == (byte)'T' && new UTF8Encoding(false).GetString(bytes) == withText);
         string second = (string)Static("WritePromptFile", plain);
         Check("H17-14 each request gets its own file", second != written && File.Exists(written) && File.Exists(second));
@@ -602,8 +590,8 @@ static class H17
         // H17-61: without instructions the prompt file is byte-equal to the 1768b9e rules
         ChatRequest plain = Request(null);
         string written = (string)Static("WritePromptFile", plain);
-        Check("H17-61 no instructions: the prompt file is exactly the 1768b9e rules text", ReadShared(written) == FrozenPlainRules
-            && ReadSharedBytes(written).Length == Encoding.UTF8.GetByteCount(FrozenPlainRules));
+        Check("H17-61 no instructions: the prompt file is exactly the 1768b9e rules text", File.ReadAllText(written, new UTF8Encoding(false)) == FrozenPlainRules
+            && File.ReadAllBytes(written).Length == Encoding.UTF8.GetByteCount(FrozenPlainRules));
         Static("DeletePromptFile", written);
 
         // H17-62: without instructions a note is byte-equal to 1768b9e's, apart from updated:
@@ -658,7 +646,7 @@ static class H17
         ProcessStartInfo ps = (ProcessStartInfo)Static("BuildStart", Path.Combine(root, "npm dir", "claude.cmd"), Request("x"), fileArg);
         Check("H17-65 hostile instructions change nothing on the command line", hs.Arguments == ps.Arguments && !hs.Arguments.Contains("evil.json") && !hs.Arguments.Contains("whoami"));
         string hostileFile = (string)Static("WritePromptFile", bad);
-        Check("H17-65 the file holds them verbatim between the preamble and the rules", ReadShared(hostileFile) == Const("InstructionsPreamble") + "\n\n" + hostile + "\n\n" + FrozenPlainRules);
+        Check("H17-65 the file holds them verbatim between the preamble and the rules", File.ReadAllText(hostileFile, new UTF8Encoding(false)) == Const("InstructionsPreamble") + "\n\n" + hostile + "\n\n" + FrozenPlainRules);
         Static("DeletePromptFile", hostileFile);
 
         // H17-66: unreadable files read as none, without an exception; Save(null) is handled
@@ -723,8 +711,8 @@ static class H17
         {
             string held = (string)Static("WritePromptFile", plain);
             Stopwatch timer;
-            // Another program holding it open without sharing delete; it has to share write, because the widget holds it too.
-            using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            // Another program holding it open without sharing delete (it shares read, because the widget holds it for reading too).
+            using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
                 timer = Stopwatch.StartNew();
                 Static("DeletePromptFile", held);

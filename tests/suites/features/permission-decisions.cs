@@ -312,7 +312,7 @@ static class H20
         File.WriteAllText(claude, "not a program");
         Environment.SetEnvironmentVariable("PATH", Path.GetDirectoryName(claude));
         string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
-        bool writeBlockedSettings = false, writeBlockedPrompt = false, readOk = false, bothThere = false, deleteBlocked = false;
+        bool writeBlockedSettings = false, writeBlockedPrompt = false, readOk = false, bothThere = false, deleteBlocked = false, plainWriterBlocked = false, renameBlocked = false;
         string seenSettings = null;
         ChatClient.StartFaultForTests = delegate(ProcessStartInfo info)
         {
@@ -324,10 +324,12 @@ static class H20
             try { File.Delete(s); } catch (IOException) { deleteBlocked = true; } catch (UnauthorizedAccessException) { deleteBlocked = true; }
             try
             {
-                using (FileStream f = new FileStream(s, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                using (StreamReader r = new StreamReader(f)) seenSettings = r.ReadToEnd();
-                using (new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) { }
+                // A plain reader, sharing read only.
+                seenSettings = File.ReadAllText(s);
+                using (new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.Read)) { }
                 readOk = true;
+                try { using (new FileStream(s, FileMode.Open, FileAccess.ReadWrite, FileShare.Read)) { } } catch (IOException) { plainWriterBlocked = true; }
+                try { File.Move(s, s + ".moved"); } catch (IOException) { renameBlocked = true; } catch (UnauthorizedAccessException) { renameBlocked = true; }
             }
             catch (IOException) { }
             return new IOException("stop here");
@@ -339,7 +341,8 @@ static class H20
             && Directory.GetFiles(folder, "*.txt").Length == 0 && Directory.GetFiles(folder, "*.settings.json").Length == 0, failed.Outcome + " " + bothThere);
         Check("H20-57 while the request is live, the settings file can't be opened for writing or deleted", writeBlockedSettings && deleteBlocked);
         Check("H20-58 while the request is live, the prompt file can't be opened for writing", writeBlockedPrompt);
-        Check("H20-59 both can be read, sharing write as Claude Code does, and the settings file holds the ask list", readOk && seenSettings != null && AskList(seenSettings).SequenceEqual((List<string>)Static("ToolsFor", laptop)));
+        Check("H20-59 both can be read by a plain reader sharing read only, and the settings file holds the ask list", readOk && seenSettings != null && AskList(seenSettings).SequenceEqual((List<string>)Static("ToolsFor", laptop)));
+        Check("H20-59 a plain writer (sharing read) and a rename are refused too", plainWriterBlocked && renameBlocked);
         System.Collections.IDictionary held = (System.Collections.IDictionary)typeof(ChatClient).GetField("heldFiles", Any).GetValue(null);
         Check("H20-60 after the request, no file is held open", held.Count == 0, held.Count.ToString());
 

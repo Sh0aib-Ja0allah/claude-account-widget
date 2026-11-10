@@ -67,13 +67,6 @@ static class H18
         return new ChatClient().Ask(r, delegate(string a, string b) { return Task.FromResult(false); }).Result;
     }
 
-    // The widget holds the file open while the request is live; Claude Code reads it sharing write.
-    static string ReadShared(string path)
-    {
-        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (StreamReader r = new StreamReader(f, new UTF8Encoding(false))) return r.ReadToEnd();
-    }
-
     static int PromptFiles(string temp)
     {
         string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
@@ -123,7 +116,7 @@ static class H18
         {
             captured = info;
             Match m = Regex.Match(info.Arguments, "--append-system-prompt-file \"([^\"]+)\"");
-            fileOnDisk = m.Success && File.Exists(m.Groups[1].Value) ? ReadShared(m.Groups[1].Value) : null;
+            fileOnDisk = m.Success && File.Exists(m.Groups[1].Value) ? File.ReadAllText(m.Groups[1].Value) : null;
             return new IOException("stop before starting");
         };
         foreach (string kind in new[] { "plain", "instructions", "folder", "laptop", "output", "recall" })

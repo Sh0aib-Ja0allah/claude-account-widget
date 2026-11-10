@@ -4990,18 +4990,29 @@ class ChatClient
         return path;
     }
 
-    // Per-request files stay open, shared for reading only, until the request ends: other programs (Claude Code included)
-    // can read them, but none can change, rename or delete them while they're in use.
+    // Per-request files stay open, read-only and shared for reading only, until the request ends: any program (Claude Code
+    // included, whatever sharing it asks for when it reads) can read them, but none can change, rename or delete them.
+    // The file is written with no sharing at all, closed, then reopened that way; what's read back through the held handle
+    // must be exactly what was written, so a change slipped into the moment between the two opens fails the request.
     static readonly Dictionary<string, FileStream> heldFiles = new Dictionary<string, FileStream>(StringComparer.OrdinalIgnoreCase);
 
     static void WriteHeld(string path, string text)
     {
-        FileStream stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        byte[] bytes = new UTF8Encoding(false).GetBytes(text);
+        using (FileStream writing = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            writing.Write(bytes, 0, bytes.Length);
+            writing.Flush(true);
+        }
+        FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         try
         {
-            byte[] bytes = new UTF8Encoding(false).GetBytes(text);
-            stream.Write(bytes, 0, bytes.Length);
-            stream.Flush(true);
+            byte[] back = new byte[bytes.Length + 1];
+            int read = 0, n;
+            while (read < back.Length && (n = stream.Read(back, read, back.Length - read)) > 0) read += n;
+            bool same = read == bytes.Length;
+            for (int i = 0; same && i < bytes.Length; i++) same = back[i] == bytes[i];
+            if (!same) throw new IOException("The request file changed while it was being written.");
         }
         catch
         {

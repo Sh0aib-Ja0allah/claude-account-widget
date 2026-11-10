@@ -51,10 +51,9 @@ static class Fake
         return 0;
     }
 
-    // Claude Code (Node) opens files sharing read, write and delete, so it can read a file the widget holds open.
+    // A plain reader that shares read only, the strictest way Claude Code could open the files the widget holds.
     static string Shared(string path)
     {
-        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (StreamReader r = new StreamReader(f, new UTF8Encoding(false))) return r.ReadToEnd();
+        return File.ReadAllText(path, new UTF8Encoding(false));
     }
 }
