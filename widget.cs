@@ -3951,6 +3951,11 @@ static class SignInGuard
         get { return HomeOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile); }
     }
 
+    internal static string HomeFolder
+    {
+        get { return Home; }
+    }
+
     static readonly Regex CommandPattern = new Regex(
         @"credential|\.cred|claude\.json|oauthaccount|claude\s+(auth|login|logout|setup-token)|(^|[\\/""'\s~=])\.claude([\\/""'\s*?]|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -4237,23 +4242,52 @@ static class SignInGuard
         }
         if (error != 2 && error != 3) return GuardResult.Unresolved;
         // Not there: the nearest folder that is decides where it would be created.
+        string full = NearestReal(path);
+        if (full == null) return GuardResult.Unresolved;
+        return NamesTarget(full) ? GuardResult.SignIn : Max(worst, found);
+    }
+
+    // The real path of a file that doesn't exist yet: its nearest existing folder's real path plus the rest. Null when
+    // no folder on the path can be opened. Only call it for a path LocalDisk has passed.
+    static string NearestReal(string path)
+    {
         int rootLength = RootLength(path);
         string parent = path.TrimEnd('\\');
+        int error;
         while (true)
         {
             int cut = parent.LastIndexOf('\\');
-            if (cut < 0 || cut + 1 < rootLength) return GuardResult.Unresolved;
+            if (cut < 0 || cut + 1 < rootLength) return null;
             parent = parent.Substring(0, cut + 1);
             Opened p = Open(parent, out error);
-            if (p != null)
-            {
-                if (!p.Directory || p.Final == null) return GuardResult.Unresolved;
-                string full = p.Final.TrimEnd('\\') + "\\" + path.Substring(parent.Length);
-                return NamesTarget(full) ? GuardResult.SignIn : Max(worst, found);
-            }
-            if (error != 2 && error != 3) return GuardResult.Unresolved;
+            if (p != null) return p.Directory && p.Final != null ? p.Final.TrimEnd('\\') + "\\" + path.Substring(parent.Length) : null;
+            if (error != 2 && error != 3) return null;
             parent = parent.TrimEnd('\\');
         }
+    }
+
+    // The real full paths a path field leads to, for the protected-target check: the final path on a local disk (through
+    // links, junctions and subst), otherwise the expanded path as written. Network and device paths are never opened.
+    internal static List<string> RealPaths(string raw, string workingFolder)
+    {
+        List<string> paths = new List<string>();
+        foreach (string candidate in Candidates(raw, workingFolder))
+        {
+            if (candidate == null) continue;
+            string path = Lexical(candidate);
+            if (path == null) continue;
+            string local = Substitute(path);
+            string real = null;
+            if (local != null && LocalDisk(local))
+            {
+                int error;
+                Opened o = Open(local, out error);
+                if (o != null) real = o.Final;
+                else if (error == 2 || error == 3) real = NearestReal(local);
+            }
+            paths.Add(real ?? path);
+        }
+        return paths;
     }
 
     static bool Contains(List<string> list, string item)
@@ -4453,6 +4487,234 @@ static class SignInGuard
         foreach (string name in TargetNames)
         {
             if (regex.IsMatch(name)) return true;
+        }
+        return false;
+    }
+}
+
+enum PermissionOutcome { Refuse, Card, Allow }
+
+// What a permission decision needs beyond the call itself. Tests fill in their own folders.
+class DecisionContext
+{
+    // The folder Claude works in (the memory folder), for relative paths and searches without a path.
+    public string WorkingFolder;
+    // The widget's own data folder: settings.txt, chat-access.txt and the rest.
+    public string WidgetFolder;
+    // Where the per-request prompt and settings files live.
+    public string PromptFolder;
+    // The user's own links. WebFetch to their sites needs no card in a normal chat.
+    public List<string> Links = new List<string>();
+    public List<string> StartupFolders = new List<string>
+    {
+        Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup),
+    };
+}
+
+// Targets that still get a card in a bypass chat, built from Claude Code's protected-paths list (permission-modes page,
+// read 2026-11-09), plus this widget's own files, start-up items, PowerShell profiles and network paths. For file tools
+// the real target path is judged. For commands it's a best-effort look at the text, which a script can get past.
+static class ProtectedTargets
+{
+    internal const string ListDate = "2026-11-09";
+    static readonly string[] Folders = { ".git", ".vscode", ".idea", ".husky", ".cargo", ".devcontainer", ".yarn", ".mvn", ".claude" };
+    static readonly string[] Files =
+    {
+        ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zprofile",
+        ".zshenv", ".zlogin", ".zlogout", ".cshrc", ".tcshrc", ".kshrc", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnp.cjs", ".pnp.loader.mjs",
+        ".pnpmfile.cjs", "bunfig.toml", ".bunfig.toml", ".bazelrc", ".bazelversion", ".bazeliskrc", ".pre-commit-config.yaml",
+        "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml", "lefthook-local.yml", "lefthook-local.yaml",
+        ".lefthook-local.yml", ".lefthook-local.yaml", "gradle-wrapper.properties", "maven-wrapper.properties", ".devcontainer.json",
+        ".ripgreprc", "pyrightconfig.json", ".mcp.json", "remote-settings.json",
+    };
+    static readonly string[] WriteTools = { "Edit", "Write", "MultiEdit", "NotebookEdit" };
+
+    static readonly Regex Segment = new Regex(
+        @"(^|[\\/\s""'=(:])(" + Names(Folders) + "|" + Names(Files) + @"|\.config[\\/]+git|chat-(access|bypass|instructions)\.txt|ClaudeAccountWidget[\w.-]*)([\\/\s""');]|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    static readonly Regex RiskyCommand = new Regex(
+        @"\bgit\s+(config\b|-c\b)|--no-verify\b|\breg(\.exe)?\s+(add|import|copy|restore|load)\b[^|;&]*\\Run|\b(Set|New)-ItemProperty\b[^|;&]*\\Run\b|\bschtasks\b[^|;&]*/create|\bRegister-ScheduledTask\b|" +
+        @"Start Menu[\\/]+Programs[\\/]+Startup|shell:(common )?startup|\$PROFILE\b|profile\.ps1\b|(^|[\s""'=(])(\\\\|//)[A-Za-z0-9._@-]+[\\/]",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    static readonly Regex Recursive = new Regex(
+        @"\bgrep\b[^|;&]*\s-[A-Za-z]*[rR]|\bgrep\b[^|;&]*--(recursive|dereference-recursive)\b|\brg\b|\bfindstr\b[^|;&]*/s\b|-Recurse\b|\b(dir|cmd)\b[^|;&]*/s\b|\bfind\b|\bls\b[^|;&]*\s-[A-Za-z]*R|\b(gci|ls|dir|Get-ChildItem)\b[^|;&]*\s-r\b|\btree\b",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    static string Names(string[] names)
+    {
+        List<string> escaped = new List<string>();
+        foreach (string n in names) escaped.Add(Regex.Escape(n));
+        return string.Join("|", escaped.ToArray());
+    }
+
+    // Whether this call aims at a protected target. Only writes are judged by path; reads of these files are fine.
+    internal static bool Matches(string tool, Dictionary<string, object> input, DecisionContext context)
+    {
+        if (input == null) return false;
+        if (tool == "Bash" || tool == "PowerShell")
+        {
+            foreach (KeyValuePair<string, object> pair in input)
+            {
+                string command = pair.Value as string;
+                if (command != null && pair.Key != "description" && CommandMatches(command, context)) return true;
+            }
+            return false;
+        }
+        if (Array.IndexOf(WriteTools, tool) < 0) return false;
+        return PathFieldMatches(input, context, 0);
+    }
+
+    static bool PathFieldMatches(object value, DecisionContext context, int depth)
+    {
+        if (depth > 6) return false;
+        System.Collections.IDictionary map = value as System.Collections.IDictionary;
+        if (map != null)
+        {
+            foreach (System.Collections.DictionaryEntry e in map)
+            {
+                string key = Convert.ToString(e.Key, CultureInfo.InvariantCulture);
+                string text = e.Value as string;
+                if (text != null)
+                {
+                    if ((key == "file_path" || key == "notebook_path" || key == "path") && PathMatches(text, context)) return true;
+                }
+                else if (PathFieldMatches(e.Value, context, depth + 1)) return true;
+            }
+            return false;
+        }
+        System.Collections.IEnumerable list = value as System.Collections.IEnumerable;
+        if (list != null && !(value is string))
+        {
+            foreach (object item in list)
+            {
+                if (PathFieldMatches(item, context, depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+
+    internal static bool PathMatches(string raw, DecisionContext context)
+    {
+        foreach (string path in SignInGuard.RealPaths(raw, context.WorkingFolder))
+        {
+            if (path.StartsWith(@"\\") && !Regex.IsMatch(path, @"^\\\\[?.]\\([A-Za-z]:|Volume\{|GLOBALROOT\\Device\\HarddiskVolume)", RegexOptions.IgnoreCase)) return true;
+            List<string> parts = new List<string>();
+            foreach (string part in path.Split('\\'))
+            {
+                string p = part;
+                int colon = p.IndexOf(':');
+                if (colon > 0 && parts.Count > 0) p = p.Substring(0, colon);
+                p = p.TrimEnd('.', ' ');
+                if (p.Length > 0) parts.Add(p);
+            }
+            for (int i = 0; i < parts.Count; i++)
+            {
+                bool last = i == parts.Count - 1;
+                if (!last && Contains(Folders, parts[i])) return true;
+                if (last && (Contains(Files, parts[i]) || Contains(Folders, parts[i]))) return true;
+                if (!last && parts[i].Equals(".config", StringComparison.OrdinalIgnoreCase) && parts[i + 1].Equals("git", StringComparison.OrdinalIgnoreCase)) return true;
+                if (last && parts[i].EndsWith("profile.ps1", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            foreach (string folder in Watched(context))
+            {
+                if (Under(path, folder)) return true;
+            }
+        }
+        return false;
+    }
+
+    // The widget's own folders and the start-up folders: anything changed there gets a card.
+    static List<string> Watched(DecisionContext context)
+    {
+        List<string> folders = new List<string> { context.WidgetFolder, context.PromptFolder };
+        folders.AddRange(context.StartupFolders);
+        return folders;
+    }
+
+    static bool Contains(string[] names, string name)
+    {
+        foreach (string n in names)
+        {
+            if (n.Equals(name, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    static bool Under(string path, string folder)
+    {
+        if (string.IsNullOrEmpty(folder)) return false;
+        foreach (string real in SignInGuard.RealPaths(folder, null))
+        {
+            string root = real.TrimEnd('\\');
+            if (path.Equals(root, StringComparison.OrdinalIgnoreCase) || path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    // Best effort: a command that names a protected target, changes git settings or hooks, adds a start-up item or
+    // touches a network path, or searches recursively from the home folder or a drive root.
+    internal static bool CommandMatches(string command, DecisionContext context)
+    {
+        string text = Regex.Replace(command, @"[`^""']", " ");
+        if (Segment.IsMatch(command) || Segment.IsMatch(text) || RiskyCommand.IsMatch(command)) return true;
+        foreach (string folder in Watched(context))
+        {
+            if (string.IsNullOrEmpty(folder)) continue;
+            string f = folder.TrimEnd('\\', '/');
+            if (command.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0 || command.IndexOf(f.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        if (!Recursive.IsMatch(command)) return false;
+        string home = SignInGuard.HomeFolder.TrimEnd('\\');
+        string homePattern = @"(^|[\s""'=(])~([\\/\s""')]|$)|\$\{?HOME\b|%USERPROFILE%|%HOMEPATH%|\$env:(USERPROFILE|HOME)\b|" +
+            @"(^|[\s""'=(])([A-Za-z]:[\\/]?|/[A-Za-z]?/?|/mnt/[A-Za-z]/?)([\s""')]|$)|" +
+            Regex.Escape(home) + "|" + Regex.Escape(home.Replace('\\', '/'));
+        return Regex.IsMatch(command, homePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+}
+
+// The one place a tool call is judged, in this order:
+// 1. a tool this chat wasn't given → Refuse;
+// 2. the sign-in guard says it touches, or could touch, a sign-in file → Refuse, with SignInMessage;
+// 3. a path the guard can't resolve → Card, in every mode;
+// 4. bypass: a protected target (ProtectedTargets) → Card;
+// 5. bypass: everything else → Allow;
+// 6. normal: reads, web search and the user's own sites → Allow; edits, writes, commands and other sites → Card.
+// The output folder (writes there need no card) and settling it before a command are handled by the caller.
+static class PermissionDecision
+{
+    internal const string SignInMessage = "Claude Code's sign-in files are always blocked.";
+    internal const string DeclinedMessage = "The user didn't approve this.";
+    static readonly string[] Reads = { "Read", "Grep", "Glob", "WebSearch" };
+    static readonly string[] NeedApproval = { "Bash", "PowerShell", "Edit", "Write", "WebFetch" };
+
+    internal static PermissionOutcome Decide(string tool, Dictionary<string, object> input, bool bypass, IList<string> tools, DecisionContext context, out string message)
+    {
+        message = DeclinedMessage;
+        if (tool == null || input == null || tools == null || !tools.Contains(tool)) return PermissionOutcome.Refuse;
+        GuardResult guard = SignInGuard.Check(tool, input, context.WorkingFolder);
+        if (guard == GuardResult.SignIn)
+        {
+            message = SignInMessage;
+            return PermissionOutcome.Refuse;
+        }
+        if (guard == GuardResult.Unresolved) return PermissionOutcome.Card;
+        if (bypass) return ProtectedTargets.Matches(tool, input, context) ? PermissionOutcome.Card : PermissionOutcome.Allow;
+        if (Array.IndexOf(Reads, tool) >= 0 || (tool == "WebFetch" && IsGivenSite(input, context))) return PermissionOutcome.Allow;
+        return Array.IndexOf(NeedApproval, tool) >= 0 ? PermissionOutcome.Card : PermissionOutcome.Refuse;
+    }
+
+    // The user's own links, and other pages on those sites, open without another question.
+    internal static bool IsGivenSite(Dictionary<string, object> input, DecisionContext context)
+    {
+        object value;
+        string url = input.TryGetValue("url", out value) ? value as string : null;
+        Uri page;
+        if (url == null || !Uri.TryCreate(url, UriKind.Absolute, out page)) return false;
+        foreach (string link in context.Links)
+        {
+            Uri given;
+            if (Uri.TryCreate(link, UriKind.Absolute, out given) && string.Equals(page.Host, given.Host, StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
     }
