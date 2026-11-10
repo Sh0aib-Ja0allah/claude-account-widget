@@ -3987,23 +3987,32 @@ static class SignInGuard
     }
 
     // The sign-in files as they are now. Copies appear and go, so this is listed again for every check.
+    // The real-CLI check (R1) adds a decoy home here: its sign-in files are guarded as well as the real ones.
+    internal static List<string> ExtraHomesForTests;
+
     internal static List<string> TargetFiles()
     {
-        string home = Home;
-        if (OpenLogForTests != null) OpenLogForTests(home);
-        List<string> files = new List<string> { Path.Combine(home, ".claude", ".credentials.json"), Path.Combine(home, ".claude.json") };
-        try
+        List<string> homes = new List<string> { Home };
+        if (ExtraHomesForTests != null) homes.AddRange(ExtraHomesForTests);
+        List<string> files = new List<string>();
+        foreach (string home in homes)
         {
-            foreach (string f in Directory.GetFiles(home, ".claude.json*"))
+            if (OpenLogForTests != null) OpenLogForTests(home);
+            files.Add(Path.Combine(home, ".claude", ".credentials.json"));
+            files.Add(Path.Combine(home, ".claude.json"));
+            try
             {
-                if (!files.Contains(f)) files.Add(f);
+                foreach (string f in Directory.GetFiles(home, ".claude.json*"))
+                {
+                    if (!files.Contains(f)) files.Add(f);
+                }
+                string backups = Path.Combine(home, ".claude", "backups");
+                if (OpenLogForTests != null) OpenLogForTests(backups);
+                if (Directory.Exists(backups)) files.AddRange(Directory.GetFiles(backups, "*", SearchOption.AllDirectories));
             }
-            string backups = Path.Combine(home, ".claude", "backups");
-            if (OpenLogForTests != null) OpenLogForTests(backups);
-            if (Directory.Exists(backups)) files.AddRange(Directory.GetFiles(backups, "*", SearchOption.AllDirectories));
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
         return files;
     }
 
@@ -4899,10 +4908,13 @@ class ChatClient
     internal static List<string> DenyRules(List<string> tools)
     {
         List<string> rules = new List<string>();
-        string home = Path.GetDirectoryName(ProtectedFiles[1]).Replace('\\', '/');
+        List<string> homes = new List<string> { Path.GetDirectoryName(ProtectedFiles[1]) };
+        if (SignInGuard.ExtraHomesForTests != null) homes.AddRange(SignInGuard.ExtraHomesForTests);
         List<string> bases = new List<string> { "~" };
-        if (home.Length > 1 && home[1] == ':')
+        foreach (string folder in homes)
         {
+            string home = folder.Replace('\\', '/');
+            if (home.Length < 2 || home[1] != ':') continue;
             string rest = home.Substring(2);
             foreach (string letter in new[] { home.Substring(0, 1).ToUpperInvariant(), home.Substring(0, 1).ToLowerInvariant() }) bases.Add("//" + letter + rest);
         }
@@ -5265,6 +5277,7 @@ class ChatClient
         string line;
         while ((line = await running.StandardOutput.ReadLineAsync()) != null)
         {
+            if (WireLogForTests != null) WireLogForTests("out", line);
             lastActivity = DateTime.UtcNow;
             Dictionary<string, object> message = null;
             try
@@ -5624,8 +5637,12 @@ class ChatClient
         return text.Substring(0, ApprovalTextLimit) + "\n\n(" + (text.Length - ApprovalTextLimit).ToString(CultureInfo.InvariantCulture) + " more characters not shown)";
     }
 
+    // Tests (the R1 harness): sees every stream-json line, "out" from claude and "in" to it.
+    internal static Action<string, string> WireLogForTests;
+
     static async Task WriteLine(Stream stdin, string text)
     {
+        if (WireLogForTests != null) WireLogForTests("in", text);
         byte[] bytes = new UTF8Encoding(false).GetBytes(text + "\n");
         try
         {
