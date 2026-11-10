@@ -1806,6 +1806,7 @@ static class H3
     // ---------- chat-bypass: how each tool call is answered (C-B). The fake claude asks with can_use_tool and logs the
     // answer as REPLY; a decoy home stands in for the profile, and the real sign-in files are never named. ----------
     static string permHome, permProj;
+    static ChatOutcome lastPermOutcome;
 
     static string Ask(string tool, string inputJson, int n)
     {
@@ -1813,6 +1814,10 @@ static class H3
     }
 
     // Plays one request in a normal laptop chat; returns the REPLY lines it logged and the cards that were asked for.
+    static bool permBypass;
+    static ChatClient permClient;
+    static Func<ChatRequest, ChatRequest> permShape;
+
     static async Task<List<Dictionary<string, object>>> Asked(List<string> cards, bool approve, params string[] toolAndInput)
     {
         List<string> lines = new List<string> { Sys };
@@ -1830,7 +1835,11 @@ static class H3
         r.WidgetFolder = data;
         r.DefaultOutputFolder = Path.Combine(root, "perm-out");
         r.CurrentOutputFolder = delegate { return null; };
-        ChatResult result = await new ChatClient().Ask(r, delegate(string tool, string detail) { lock (cards) cards.Add(tool); return Task.FromResult(approve); });
+        r.Bypass = permBypass;
+        if (permShape != null) r = permShape(r);
+        permClient = new ChatClient();
+        ChatResult result = await permClient.Ask(r, delegate(string tool, string detail) { lock (cards) cards.Add(tool); return Task.FromResult(approve); });
+        lastPermOutcome = result.Outcome;
         if (result.Outcome != ChatOutcome.Reply) Log("note: the request ended " + result.Outcome);
         List<Dictionary<string, object>> replies = new List<Dictionary<string, object>>();
         foreach (string line in FakeLines("REPLY ").Skip(before))
@@ -1909,5 +1918,93 @@ static class H3
             Check("C-B06 a read or search the guard can't resolve gets a card in a normal chat (DEC-18)", All(replies, 2, "deny", declined) && cards.SequenceEqual(new[] { "Read", "Glob" }), Show(replies) + " cards " + string.Join(",", cards.ToArray()));
         }
         finally { SignInGuard.HomeOverride = null; }
+        await BypassChats();
+    }
+
+    // ---------- C-B10 to 18: a bypass chat (laptop access plus Bypass), set directly; there's no switch yet ----------
+    static async Task BypassChats()
+    {
+        string plain = Path.Combine(permProj, "notes.txt");
+        string signIn = (string)typeof(PermissionDecision).GetField("SignInMessage", Any).GetValue(null);
+        string declined = (string)typeof(PermissionDecision).GetField("DeclinedMessage", Any).GetValue(null);
+        Directory.CreateDirectory(Path.Combine(permProj, ".git", "hooks"));
+        SignInGuard.HomeOverride = permHome;
+        permBypass = true;
+        try
+        {
+            List<string> cards = new List<string>();
+            List<Dictionary<string, object>> replies = await Asked(cards, false,
+                "Edit", "{\"file_path\":" + Q(plain) + ",\"old_string\":\"a\",\"new_string\":\"b\"}", "Write", "{\"file_path\":" + Q(Path.Combine(permProj, "made.txt")) + ",\"content\":\"x\"}",
+                "Bash", "{\"command\":\"npm test\"}", "WebFetch", "{\"url\":\"https://example.org/page\",\"prompt\":\"x\"}", "Read", "{\"file_path\":" + Q(plain) + "}");
+            Check("C-B10 bypass: Edit, Write, Bash, WebFetch to any site and Read are allowed with no card", All(replies, 5, "allow") && cards.Count == 0, Show(replies) + " cards " + cards.Count);
+
+            cards.Clear();
+            replies = await Asked(cards, true, "Read", "{\"file_path\":" + Q(Path.Combine(permHome, ".claude.json")) + "}");
+            Check("C-B11 bypass: reading the decoy sign-in file is refused with the exact message", All(replies, 1, "deny", signIn) && cards.Count == 0, Show(replies));
+            replies = await Asked(cards, true, "Read", "{\"file_path\":\"~/.claude.json.backup\"}", "Bash", "{\"command\":\"type %USERPROFILE%\\\\.claude.json\"}");
+            Check("C-B12 bypass: a copy, and a command naming the file, are refused", All(replies, 2, "deny", signIn) && cards.Count == 0, Show(replies));
+            replies = await Asked(cards, true, "Grep", "{\"pattern\":\"oauth\",\"path\":" + Q(permHome) + "}", "Glob", "{\"pattern\":\"**/*.json\",\"path\":\"~\"}");
+            Check("C-B13 bypass: a search over the home folder is refused", All(replies, 2, "deny", signIn) && cards.Count == 0, Show(replies));
+
+            cards.Clear();
+            replies = await Asked(cards, false,
+                "Write", "{\"file_path\":" + Q(Path.Combine(permHome, ".claude", "settings.json")) + ",\"content\":\"{}\"}",
+                "Write", "{\"file_path\":" + Q(Path.Combine(permProj, ".git", "hooks", "pre-commit")) + ",\"content\":\"x\"}",
+                "Edit", "{\"file_path\":" + Q(Path.Combine(data, "settings.txt")) + ",\"old_string\":\"a\",\"new_string\":\"b\"}",
+                "Write", "{\"file_path\":\"\\\\\\\\203.0.113.1\\\\s\\\\x.txt\",\"content\":\"x\"}");
+            Check("C-B14 bypass: Claude Code's settings, a git hook, the widget's settings.txt and a network path each get a card; declined, they're refused",
+                All(replies, 4, "deny", declined) && cards.SequenceEqual(new[] { "Write", "Write", "Edit", "Write" }), Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+            cards.Clear();
+            replies = await Asked(cards, true, "Bash", "{\"command\":\"git config core.hooksPath x\"}", "Bash", "{\"command\":\"grep -r token ~\"}");
+            Check("C-B15 bypass: git settings and a recursive search of the home folder get a card", All(replies, 2, "allow") && cards.SequenceEqual(new[] { "Bash", "Bash" }), Show(replies));
+            cards.Clear();
+            replies = await Asked(cards, false, "Read", "{\"file_path\":\"\\\\\\\\.\\\\pipe\\\\x\"}");
+            Check("C-B16 bypass: a path the guard can't resolve gets a card", All(replies, 1, "deny", declined) && cards.SequenceEqual(new[] { "Read" }), Show(replies));
+
+            // C-B17: Stop while a card is showing.
+            Script(Sys, Ask("Write", "{\"file_path\":" + Q(Path.Combine(permProj, ".git", "config")) + ",\"content\":\"x\"}", 1), "#read", "#wait");
+            ChatRequest r = InstructionsRequest(null);
+            r.Laptop = true; r.Bypass = true; r.MemoryFolder = permProj; r.WidgetFolder = data;
+            r.DefaultOutputFolder = Path.Combine(root, "perm-out"); r.CurrentOutputFolder = delegate { return null; };
+            ChatClient stopping = new ChatClient();
+            bool carded = false;
+            Task<ChatResult> pending = stopping.Ask(r, delegate(string tool, string detail) { carded = true; stopping.Stop(); return Task.FromResult(false); });
+            Task done = await Task.WhenAny(pending, Task.Delay(20000));
+            Check("C-B17 bypass: Stop while a card shows ends the request as Stopped", done == pending && carded && pending.Result.Outcome == ChatOutcome.Stopped, done == pending ? pending.Result.Outcome.ToString() : "still running");
+
+            // C-B18: the output folder is still chosen once, and later writes there follow the choice.
+            string defaultOut = Path.Combine(root, "perm-out"), chosen = Path.Combine(root, "perm-chosen");
+            Directory.CreateDirectory(defaultOut);
+            Directory.CreateDirectory(chosen);
+            int resolves = 0;
+            string current = null;
+            permShape = delegate(ChatRequest req)
+            {
+                req.DefaultOutputFolder = defaultOut;
+                req.CurrentOutputFolder = delegate { return current; };
+                req.ResolveOutputFolder = delegate { resolves++; current = chosen; return Task.FromResult(chosen); };
+                return req;
+            };
+            cards.Clear();
+            replies = await Asked(cards, false, "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, "a.txt")) + ",\"content\":\"x\"}",
+                "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, "b.txt")) + ",\"content\":\"x\"}");
+            permShape = null;
+            List<string> moved = replies.Where(x => x.ContainsKey("updatedInput")).Select(x => (string)((Dictionary<string, object>)x["updatedInput"])["file_path"]).ToList();
+            Check("C-B18 bypass: the output folder choice comes once, with no card, and both writes move to the chosen folder",
+                All(replies, 2, "allow") && resolves == 1 && cards.Count == 0 && moved.Count == 2 && moved.All(m => m.StartsWith(chosen + "\\")), resolves + " " + string.Join(", ", moved.ToArray()));
+
+            // N1: Bypass without laptop access is a normal chat.
+            permShape = delegate(ChatRequest req) { req.Laptop = false; return req; };
+            cards.Clear();
+            replies = await Asked(cards, false, "Write", "{\"file_path\":" + Q(Path.Combine(permProj, "n1.txt")) + ",\"content\":\"x\"}");
+            permShape = null;
+            Check("C-B10 N1: Bypass without laptop access answers as a chat without it (Write isn't one of its tools)", All(replies, 1, "deny", declined) && cards.Count == 0, Show(replies));
+        }
+        finally
+        {
+            permBypass = false;
+            permShape = null;
+            SignInGuard.HomeOverride = null;
+        }
     }
 }

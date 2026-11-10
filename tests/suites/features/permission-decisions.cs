@@ -219,6 +219,8 @@ static class H20
             Commands("Bash", "rg foo \"" + home + "\"", "grep -r foo " + home + "\\", "rg x $HOME/", "find ~ -name x", "find / -name x"));
 
         G3();
+        B1();
+        HeldFailure();
     }
 
     static object[] Concat(this object[] a, object[] b)
@@ -364,5 +366,82 @@ static class H20
         Check("H20-48 --disallowedTools has every DEC-3 rule: both drive cases and ~, the copies, the backups and the command patterns", missing.Count == 0 && laptopStart.Arguments.Contains("\"Read(~/.claude.json*)\""), string.Join(" ", missing.ToArray()));
         List<string> psRules = (List<string>)Static("DenyRules", withPs);
         Check("H20-49 PowerShell rules appear only when PowerShell is a tool", !rules.Any(r => r.StartsWith("PowerShell(")) && psRules.Count(r => r.StartsWith("PowerShell(")) == 8);
+    }
+
+    // ---------- b1: the bypass branch (H20-50 to 56) ----------
+    static void B1()
+    {
+        string claude = Path.Combine(root, "bin dir", "claude.exe");
+        string prompt = Path.Combine(root, "temp", "ClaudeAccountWidget-chat", "0123456789abcdef0123456789abcdef.txt");
+        ChatRequest laptop = Plain(); laptop.Laptop = true; laptop.DefaultOutputFolder = Path.Combine(root, "out"); laptop.CurrentOutputFolder = delegate { return null; };
+        ChatRequest bypass = Plain(); bypass.Laptop = true; bypass.Bypass = true; bypass.DefaultOutputFolder = laptop.DefaultOutputFolder; bypass.CurrentOutputFolder = laptop.CurrentOutputFolder;
+        string a = ((ProcessStartInfo)Static("BuildStart", claude, laptop, prompt)).Arguments;
+        string b = ((ProcessStartInfo)Static("BuildStart", claude, bypass, prompt)).Arguments;
+        string guid = "[0-9a-f]{32}";
+        Check("H20-50 the bypass and normal laptop argument strings are the same, guids aside",
+            System.Text.RegularExpressions.Regex.Replace(a, guid, "G") == System.Text.RegularExpressions.Regex.Replace(b, guid, "G") && a == b);
+        Check("H20-51 a bypass chat keeps --safe-mode, --restricted and --permission-mode manual with the stdio handler",
+            b.Contains("--safe-mode ") && b.Contains("--restricted ") && b.Contains("--permission-mode manual ") && b.Contains("--permission-prompt-tool stdio "));
+        string source = File.ReadAllText(Path.Combine(root, "..", "..", "..", "snapshot", "widget.cs"));
+        Check("H20-52 bypassPermissions appears nowhere: not in widget.cs, not in the arguments", !source.Contains("bypassPermissions") && !b.Contains("bypassPermissions"));
+        Check("H20-53 nor any other way round the handler", !source.Contains("dangerously-skip-permissions") && !source.Contains("acceptEdits") && !b.Contains("--allowedTools") && !b.Contains("\"allow\""));
+        ChatRequest noLaptop = Plain(); noLaptop.Bypass = true; noLaptop.MemoryFolder = Path.Combine(root, "memory");
+        ChatRequest plainMemory = Plain(); plainMemory.MemoryFolder = noLaptop.MemoryFolder;
+        Check("H20-54 N1: Bypass without laptop access is a normal chat: not active, the same rules and the same arguments",
+            !(bool)Static("BypassActive", noLaptop) && (bool)Static("BypassActive", bypass) && (string)Static("Rules", noLaptop) == (string)Static("Rules", plainMemory)
+            && ((ProcessStartInfo)Static("BuildStart", claude, noLaptop, prompt)).Arguments == ((ProcessStartInfo)Static("BuildStart", claude, plainMemory, prompt)).Arguments);
+        string rule = (string)typeof(ChatClient).GetField("BypassRule", Any).GetValue(null);
+        const string Expected =
+            "The user turned on bypass permissions, so you can read and edit files anywhere on this computer, run commands and open sites without the user approving each one. " +
+            "Still only edit, delete, run or open what the user asked for. " +
+            "Reading, copying or changing Claude Code's sign-in files (~/.claude/.credentials.json, ~/.claude.json and its copies) is refused, and so is signing out of, switching or changing the Claude Code account. " +
+            "Searching the whole home folder or a drive root is refused or needs the user's approval, so search a narrower folder. " +
+            "Changes to settings, git, tool-configuration and start-up files, to this widget's own files, and to network paths still need the user's approval in the window. ";
+        string rules = (string)Static("Rules", bypass);
+        string laptopRule = (string)typeof(ChatClient).GetField("LaptopRule", Any).GetValue(null);
+        Check("H20-55 BypassRule is the exact text, and a bypass chat's rules use it instead of LaptopRule", rule == Expected && rules.Contains(rule) && !rules.Contains(laptopRule)
+            && ((string)Static("Rules", laptop)).Contains(laptopRule) && !((string)Static("Rules", laptop)).Contains(rule));
+        Check("H20-56 BypassRule promises nothing it can't keep: no can't, cannot, never possible or always blocked",
+            !System.Text.RegularExpressions.Regex.IsMatch(rule, @"can't|cannot|can not|impossible|always blocked|is blocked|are blocked", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+    }
+
+    // H20-61 (the PE's LOW after g3b): a failed write of a request file leaves nothing behind.
+    static void HeldFailure()
+    {
+        string savedTemp = Environment.GetEnvironmentVariable("TEMP"), savedTmp = Environment.GetEnvironmentVariable("TMP"), savedPath = Environment.GetEnvironmentVariable("PATH");
+        string temp = Path.Combine(root, "temp-held");
+        Directory.CreateDirectory(temp);
+        Environment.SetEnvironmentVariable("TEMP", temp);
+        Environment.SetEnvironmentVariable("TMP", temp);
+        string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
+        string claude = Path.Combine(root, "bin dir", "claude.exe");
+        Environment.SetEnvironmentVariable("PATH", Path.GetDirectoryName(claude));
+        try
+        {
+            ChatRequest laptop = Plain(); laptop.Laptop = true; laptop.DefaultOutputFolder = Path.Combine(root, "out"); laptop.CurrentOutputFolder = delegate { return null; };
+            bool threw = false;
+            ChatClient.HeldFaultForTests = delegate(string path) { return new IOException("forced"); };
+            try { Static("WritePromptFile", laptop); }
+            catch (System.Reflection.TargetInvocationException e) { threw = e.InnerException is IOException; }
+            bool noneAfterPrompt = Directory.GetFiles(folder).Length == 0;
+            int calls = 0;
+            ChatClient.HeldFaultForTests = delegate(string path) { return path.EndsWith(".settings.json") ? new IOException("forced") : null; };
+            bool started = false;
+            ChatClient.StartFaultForTests = delegate(ProcessStartInfo info) { started = true; return new IOException("never"); };
+            ChatResult result = new ChatClient().Ask(laptop, delegate(string x, string y) { calls++; return Task.FromResult(false); }).Result;
+            System.Threading.Thread.Sleep(300);
+            System.Collections.IDictionary held = (System.Collections.IDictionary)typeof(ChatClient).GetField("heldFiles", Any).GetValue(null);
+            Check("H20-61 a request file that fails after it's written is deleted and released, and the request ends Failed without starting",
+                threw && noneAfterPrompt && result.Outcome == ChatOutcome.Failed && !started && Directory.GetFiles(folder).Length == 0 && held.Count == 0,
+                threw + " " + noneAfterPrompt + " " + result.Outcome + " started " + started + " files " + Directory.GetFiles(folder).Length + " held " + held.Count);
+        }
+        finally
+        {
+            ChatClient.HeldFaultForTests = null;
+            ChatClient.StartFaultForTests = null;
+            Environment.SetEnvironmentVariable("TEMP", savedTemp);
+            Environment.SetEnvironmentVariable("TMP", savedTmp);
+            Environment.SetEnvironmentVariable("PATH", savedPath);
+        }
     }
 }
