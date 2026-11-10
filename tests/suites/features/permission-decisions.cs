@@ -494,6 +494,51 @@ static class H20
             new[] { "UsageLimit", "You've hit your weekly limit \u00b7 resets Mon 9am" },
             new[] { "UsageLimit", "5-hour limit reached \u2219 resets 3pm" },
             new[] { "UsageLimit", "API Error: 429 rate limit exceeded" },
+            // Worker A's rows (f1b).
+            new[] { "NotSignedIn", "NOT LOGGED IN" },
+            new[] { "NotSignedIn", "Failed to authenticate. API Error: 401" },
+            new[] { "NotSignedIn", "HTTP/1.1 401 Unauthorized" },
+            new[] { "NotSignedIn", "HTTP 401" },
+            new[] { "NotSignedIn", "Request failed with status code 401" },
+            new[] { "NotSignedIn", @"{""status"": 401, ""error"": ""x""}" },
+            new[] { "NotSignedIn", "Login expired. Please run /login" },
+            new[] { "NotSignedIn", "stderr line\nError: 401\n" },
+            new[] { "NotSignedIn", "status=401" },
+            new[] { "NotSignedIn", "401 Unauthorized" },
+            new[] { "NotSignedIn", "statusCode: 401" },
+            new[] { "NotSignedIn", "error_code 401" },
+            new[] { "NotSignedIn", "To fix this, run /login in a terminal and try again with the build" },
+            new[] { "UsageLimit", "You've hit your limit \u00b7 resets 3pm (Europe/Berlin)" },
+            new[] { "UsageLimit", "Weekly limit reached" },
+            new[] { "UsageLimit", "You've hit your weekly usage limit" },
+            new[] { "UsageLimit", @"API Error: 429 {""type"":""error"",""error"":{""type"":""rate_limit_error"",""message"":""x""}}" },
+            new[] { "UsageLimit", "Rate limit exceeded" },
+            new[] { "UsageLimit", "statusCode=429" },
+            new[] { "Failed", @"Failed to read C:\proj\login\index.html" },
+            new[] { "Failed", "error in src/auth/signin.ts line 12" },
+            new[] { "Failed", @"Error: ENOENT: no such file or directory, open 'C:\x\authentication.md'" },
+            new[] { "Failed", "The login page returned an error" },
+            new[] { "Failed", @"Unauthorized access to C:\x was denied" },
+            new[] { "Failed", "error: 4012 items failed" },
+            new[] { "Failed", "Error code 4010" },
+            new[] { "Failed", "line 401: unexpected token" },
+            new[] { "Failed", "Saw 401 results" },
+            new[] { "Failed", @"C:\data\401\a.txt not found" },
+            new[] { "Failed", "API Error: 500 Internal server error" },
+            new[] { "Failed", @"API Error: 529 {""type"":""error"",""error"":{""type"":""overloaded_error""}}" },
+            new[] { "Failed", "Credit balance is too low" },
+            new[] { "Failed", "rate limiter module failed to load" },
+            new[] { "Failed", "sign in failed for git remote origin" },
+            new[] { "Failed", "Please log in to GitHub to continue" },
+            new[] { "Failed", "loginservice.dll could not be loaded" },
+            new[] { "Failed", @"C:\Users\x\run\login.bat failed" },
+            new[] { "Failed", "Error: authentication_errors.log is locked" },
+            new[] { "Failed", "Context limit reached \u00b7 /compact or /clear to continue" },
+            new[] { "Failed", "Maximum output token limit reached" },
+            new[] { "Failed", @"C:\logs\429\out.txt not found" },
+            new[] { "Failed", "line 429: syntax error" },
+            new[] { "Failed", "error 401 in the test fixture" },
+            new[] { "Failed", "You are not logged in to the npm registry" },
         };
         List<string> wrong = new List<string>();
         foreach (string[] row in rows)
@@ -505,6 +550,6 @@ static class H20
             rows.Length >= 20 && !wrong.Any(w => w.StartsWith("Failed")), string.Join(" | ", wrong.ToArray()));
         Check("H20-63 Classify: real sign-in errors (Not logged in, run /login, OAuth token revoked or expired, Login expired, authentication_error, a 401 status) say not signed in",
             !wrong.Any(w => w.StartsWith("NotSignedIn")), string.Join(" | ", wrong.ToArray()));
-        Check("H20-64 Classify: usage-limit text is still a usage limit", !wrong.Any(w => w.StartsWith("UsageLimit")), string.Join(" | ", wrong.ToArray()));
+        Check("H20-64 Classify: usage-limit text is still a usage limit (a 429 only as a status code; context and token limits aren't usage limits)", !wrong.Any(w => w.StartsWith("UsageLimit")), string.Join(" | ", wrong.ToArray()));
     }
 }
