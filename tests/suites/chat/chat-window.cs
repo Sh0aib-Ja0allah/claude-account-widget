@@ -1919,6 +1919,7 @@ static class H3
         }
         finally { SignInGuard.HomeOverride = null; }
         await BypassChats();
+        await MovedWrites();
     }
 
     // ---------- C-B10 to 18: a bypass chat (laptop access plus Bypass), set directly; there's no switch yet ----------
@@ -2004,6 +2005,47 @@ static class H3
         {
             permBypass = false;
             permShape = null;
+            SignInGuard.HomeOverride = null;
+        }
+    }
+
+    // C-B19 (the PE's LOW after b1): a write the output folder moves is judged again where it lands. A chosen folder on
+    // a network share, in the Startup folder or in the widget's own folder gets a card, and the share is never touched.
+    static async Task MovedWrites()
+    {
+        string defaultOut = Path.Combine(root, "perm-out2");
+        Directory.CreateDirectory(defaultOut);
+        string declined = (string)typeof(PermissionDecision).GetField("DeclinedMessage", Any).GetValue(null);
+        List<string> opened = new List<string>();
+        SignInGuard.HomeOverride = permHome;
+        SignInGuard.OpenLogForTests = delegate(string p) { lock (opened) opened.Add(p); };
+        permBypass = true;
+        try
+        {
+            var folders = new[] { new { Name = "a network share", Path = @"\\203.0.113.1\s\out" }, new { Name = "the Startup folder", Path = Environment.GetFolderPath(Environment.SpecialFolder.Startup) },
+                new { Name = "the widget's own folder", Path = data } };
+            foreach (var f in folders)
+            {
+                string chosen = f.Path;
+                permShape = delegate(ChatRequest req)
+                {
+                    req.DefaultOutputFolder = defaultOut;
+                    req.CurrentOutputFolder = delegate { return chosen; };
+                    req.ResolveOutputFolder = delegate { return Task.FromResult(chosen); };
+                    return req;
+                };
+                List<string> cards = new List<string>();
+                List<Dictionary<string, object>> replies = await Asked(cards, false, "Write", "{\"file_path\":" + Q(Path.Combine(defaultOut, "r.txt")) + ",\"content\":\"x\"}");
+                Check("C-B19 bypass: a write moved to " + f.Name + " by the output folder gets a card", All(replies, 1, "deny", declined) && cards.SequenceEqual(new[] { "Write" }),
+                    Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+            }
+            Check("C-B19 the share was never opened by the guard", !opened.Any(p => p.Contains("203.0.113")));
+        }
+        finally
+        {
+            permShape = null;
+            permBypass = false;
+            SignInGuard.OpenLogForTests = null;
             SignInGuard.HomeOverride = null;
         }
     }

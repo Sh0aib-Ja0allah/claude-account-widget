@@ -5407,20 +5407,24 @@ class ChatClient
         {
             bool unresolved, bypass = BypassActive(this.request);
             PermissionOutcome outcome = PermissionDecision.Decide(tool, input, bypass, ToolsFor(this.request), Context(), out refusal, out unresolved);
+            string judged = Moveable(input);
             if (outcome == PermissionOutcome.Allow && bypass)
             {
-                // No card, but the output folder still settles once, and a write or command aimed at it moves to the user's choice.
+                // No card, but the output folder still settles once, and a write or command aimed at it moves to the user's
+                // choice; the moved call is judged again.
                 if (tool == "Write" || tool == "Edit") await AllowInOutputFolder(tool, input);
                 if (tool == "Bash" || tool == "PowerShell") await PrepareForCommand(input);
-                allow = !stopRequested;
+                outcome = JudgeAgain(tool, input, judged, bypass, outcome, ref refusal, ref unresolved);
             }
-            else if (outcome == PermissionOutcome.Allow)
+            if (outcome == PermissionOutcome.Allow)
             {
-                allow = true;
+                allow = !stopRequested;
             }
             else if (outcome == PermissionOutcome.Card && !bypass && !unresolved && await AllowInOutputFolder(tool, input))
             {
-                // Normal chats only: in bypass, a card is for a protected or unresolved target, which the output folder never skips.
+                // Normal chats only: a write in the output folder needs no card (AllowInOutputFolder says no to any path,
+                // moved or not, that the guard doesn't clear). In bypass, a card is for a protected or unresolved target,
+                // which the output folder never skips.
                 allow = true;
             }
             else if (outcome == PermissionOutcome.Card && !stopRequested)
@@ -5529,8 +5533,35 @@ class ChatClient
             input["file_path"] = path;
         }
 
+        // A chosen folder on a network share (or anywhere the guard can't clear) is judged without being touched, and
+        // never skips a card.
+        Dictionary<string, object> target = new Dictionary<string, object>();
+        target["file_path"] = path;
+        if (SignInGuard.Check(tool, target, null) != GuardResult.Clear) return false;
         if (!IsInside(path, folder) || PassesThroughLink(path, folder)) return false;
         return !string.Equals(Path.GetFileName(path), "desktop.ini", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The parts of a call the output folder can move.
+    static string Moveable(Dictionary<string, object> input)
+    {
+        return Field(input, "file_path") + "\n" + Field(input, "command");
+    }
+
+    // A call the output folder moved is judged again, and the stricter answer counts (Refuse, then Card, then Allow).
+    PermissionOutcome JudgeAgain(string tool, Dictionary<string, object> input, string judged, bool bypass, PermissionOutcome outcome, ref string refusal, ref bool unresolved)
+    {
+        if (Moveable(input) == judged) return outcome;
+        string message;
+        bool unknown;
+        PermissionOutcome again = PermissionDecision.Decide(tool, input, bypass, ToolsFor(request), Context(), out message, out unknown);
+        unresolved |= unknown;
+        if ((int)again < (int)outcome)
+        {
+            refusal = message;
+            return again;
+        }
+        return outcome;
     }
 
     // What PermissionDecision needs to know about this request.
