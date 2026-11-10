@@ -5238,13 +5238,23 @@ class ChatClient
         return Classify(errors.IsCompleted ? errors.Result : "");
     }
 
+    // Whole phrases only, because the text includes the model's own words and file paths: "designing", "catalog in",
+    // login.html or signin.cs must never say the user isn't signed in. A 401 or 429 counts only as a status code.
+    // Anything unsure is the plain Failed message. The phrases are the ones Claude Code 2.1.318 contains. "Invalid API
+    // key" alone is about an API key, not the sign-in, so it's plain Failed unless "run /login" comes with it.
+    const string SignInErrors =
+        @"\bnot logged in\b|\brun /login\b|\bauthentication_error\b|\boauth token(?: has| has been)? (?:revoked|expired)\b|\blogin expired\b|" +
+        @"(?:\bstatus(?: code)?|\bhttp(?:/\d(?:\.\d)?)?|\berror|\bcode)[""':\s]{1,4}401\b";
+    const string UsageErrors =
+        @"\busage limit\b|\blimit reached\b|\bhit your\b[^\n]{0,40}?\blimit\b|\brate limit\b|\b429\b";
+
     static ChatResult Classify(string detail)
     {
-        if (Regex.IsMatch(detail, @"not logged in|log ?in|sign ?in|authenticat|unauthorized|\b401\b", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(detail, SignInErrors, RegexOptions.IgnoreCase))
         {
             return new ChatResult(ChatOutcome.NotSignedIn, null);
         }
-        if (Regex.IsMatch(detail, @"usage limit|limit reached|hit your .*limit|rate limit|\b429\b", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(detail, UsageErrors, RegexOptions.IgnoreCase))
         {
             return new ChatResult(ChatOutcome.UsageLimit, null);
         }

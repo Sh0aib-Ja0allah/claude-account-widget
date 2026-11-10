@@ -221,6 +221,7 @@ static class H20
         G3();
         B1();
         HeldFailure();
+        Failures();
     }
 
     static object[] Concat(this object[] a, object[] b)
@@ -443,5 +444,67 @@ static class H20
             Environment.SetEnvironmentVariable("TMP", savedTmp);
             Environment.SetEnvironmentVariable("PATH", savedPath);
         }
+    }
+
+    // H20-62 to 64 (f1-classify): a failed request says "isn't signed in" only for a real sign-in error.
+    static void Failures()
+    {
+        string[][] rows = {
+            // Not sign-in errors: ordinary words, paths and code.
+            new[] { "Failed", "Error while designing the layout" },
+            new[] { "Failed", "Could not open catalog in the store" },
+            new[] { "Failed", @"ENOENT: no such file C:\site\pages\login.html" },
+            new[] { "Failed", "<button>Go to the sign in page</button> failed to render" },
+            new[] { "Failed", @"error CS1002: ; expected in src\signin.cs(12,4)" },
+            new[] { "Failed", "Logging in to the build server failed" },
+            new[] { "Failed", "authenticator.js threw TypeError" },
+            new[] { "Failed", "line 401 of parser.js: unexpected token" },
+            new[] { "Failed", "the /login route returned 500" },
+            new[] { "Failed", "a sign-in flow was being designed when the process exited with code 1" },
+            new[] { "Failed", "" },
+            new[] { "Failed", "sublimit reached for the parser" },
+            new[] { "Failed", "file4290.txt is missing" },
+            new[] { "Failed", "I was designing the page when it failed" },
+            new[] { "Failed", "blog index not found; catalog in use" },
+            new[] { "Failed", "could not assign input to the foreign interface" },
+            new[] { "Failed", "error 4010 on port 14011" },
+            new[] { "Failed", "you may need to log in to that site first" },
+            // API-key errors aren't about the sign-in.
+            new[] { "Failed", "Invalid API key \u00b7 Fix external API key" },
+            new[] { "Failed", "Invalid API key format" },
+            new[] { "Failed", "invalid x-api-key" },
+            // Real sign-in errors (the strings in Claude Code 2.1.318).
+            new[] { "NotSignedIn", "Not logged in \u00b7 Please run /login" },
+            new[] { "NotSignedIn", "Not logged in \u00b7 Run /login" },
+            new[] { "NotSignedIn", "Not logged in. Run claude auth login to authenticate." },
+            new[] { "NotSignedIn", "OAuth token revoked \u00b7 Please run /login" },
+            new[] { "NotSignedIn", "OAuth token has been revoked" },
+            new[] { "NotSignedIn", "Login expired \u00b7 Please run /login" },
+            new[] { "NotSignedIn", "Login reached its time limit \u00b7 Please run /login" },
+            new[] { "NotSignedIn", "Invalid API key \u00b7 Please run /login" },
+            new[] { "NotSignedIn", "Please run /login to sign in again." },
+            new[] { "NotSignedIn", @"{""type"":""error"",""error"":{""type"":""authentication_error"",""message"":""x""}}" },
+            new[] { "NotSignedIn", @"{""status"":401,""message"":""x""}" },
+            new[] { "NotSignedIn", "HTTP 401 Unauthorized" },
+            // Assumed: "OAuth token has expired" isn't a fixed string in 2.1.318; it may come from the server in a 401 reply.
+            new[] { "NotSignedIn", @"API Error: 401 {""type"":""error"",""error"":{""type"":""authentication_error"",""message"":""OAuth token has expired.""}}" },
+            new[] { "NotSignedIn", "OAuth token has expired. Please obtain a new token or refresh your existing token." },
+            // Usage limits.
+            new[] { "UsageLimit", "Claude AI usage limit reached|1700000000" },
+            new[] { "UsageLimit", "You've hit your weekly limit \u00b7 resets Mon 9am" },
+            new[] { "UsageLimit", "5-hour limit reached \u2219 resets 3pm" },
+            new[] { "UsageLimit", "API Error: 429 rate limit exceeded" },
+        };
+        List<string> wrong = new List<string>();
+        foreach (string[] row in rows)
+        {
+            ChatResult r = (ChatResult)Static("Classify", row[1]);
+            if (r.Outcome.ToString() != row[0]) wrong.Add(row[0] + " <- " + r.Outcome + ": " + row[1]);
+        }
+        Check("H20-62 Classify: ordinary words, paths and code (designing, catalog in, login.html, signin.cs, sign in page, 4010) and API-key errors are plain Failed",
+            rows.Length >= 20 && !wrong.Any(w => w.StartsWith("Failed")), string.Join(" | ", wrong.ToArray()));
+        Check("H20-63 Classify: real sign-in errors (Not logged in, run /login, OAuth token revoked or expired, Login expired, authentication_error, a 401 status) say not signed in",
+            !wrong.Any(w => w.StartsWith("NotSignedIn")), string.Join(" | ", wrong.ToArray()));
+        Check("H20-64 Classify: usage-limit text is still a usage limit", !wrong.Any(w => w.StartsWith("UsageLimit")), string.Join(" | ", wrong.ToArray()));
     }
 }
