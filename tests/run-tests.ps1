@@ -117,7 +117,7 @@ function Invoke-Suite([string]$suite, [string]$exe, [string[]]$arguments, [switc
 $src = @((Join-Path $snapshot 'widget.cs'), (Join-Path $snapshot 'preview.cs'))
 $features = Join-Path $tests 'suites\features'
 $widgetSuite = Join-Path $tests 'suites\widget'
-$widgetFiles = 'widget-main.cs', 'settings-window.cs', 'usage-alerts.cs', 'limit-forecast.cs', 'review-fixes-s2.cs', 'history-recording.cs', 'history-chart.cs', 'review-fixes-s4.cs', 'chat-shortcut.cs', 'review-fixes-s5.cs', 'update-notice.cs', 'review-fixes-s6.cs', 'screenshot.cs', 'review-fixes-s7.cs', 'strict-release-links.cs', 'account-profile.cs', 'test-copy-windows.cs', 'settings-layout.cs', 'chat-width.cs', 'settings-switches.cs', 'card-notes.cs', 'sidebar-account.cs' | ForEach-Object { Join-Path $widgetSuite $_ }
+$widgetFiles = 'widget-main.cs', 'settings-window.cs', 'usage-alerts.cs', 'limit-forecast.cs', 'review-fixes-s2.cs', 'history-recording.cs', 'history-chart.cs', 'review-fixes-s4.cs', 'chat-shortcut.cs', 'review-fixes-s5.cs', 'update-notice.cs', 'review-fixes-s6.cs', 'screenshot.cs', 'review-fixes-s7.cs', 'strict-release-links.cs', 'account-profile.cs', 'test-copy-windows.cs', 'settings-layout.cs', 'chat-width.cs', 'settings-switches.cs', 'card-notes.cs', 'sidebar-account.cs', 'bypass-switch.cs' | ForEach-Object { Join-Path $widgetSuite $_ }
 
 # Each feature suite is its own program; $main is its entry class (the classes kept their original H-names).
 function Invoke-Feature([string]$name, [string]$main, [string[]]$arguments) {

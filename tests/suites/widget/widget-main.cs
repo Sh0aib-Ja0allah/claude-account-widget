@@ -73,7 +73,7 @@ static partial class H4
     static async Task Run(string mode)
     {
         if (mode == "png") { await Png(); return; }
-        string[] sections = { "s0", "s0proc", "s1", "s2", "s3", "fixes", "s4", "s5", "fixes2", "s6", "fixes3", "s7", "fixes4", "fixes5", "fixes6", "acct", "live", "layout", "chatw", "switch", "notes", "c3d" };
+        string[] sections = { "s0", "s0proc", "s1", "s2", "s3", "fixes", "s4", "s5", "fixes2", "s6", "fixes3", "s7", "fixes4", "fixes5", "fixes6", "acct", "live", "layout", "chatw", "switch", "notes", "c3d", "bypass" };
         foreach (string section in sections)
         {
             if (mode != "all" && mode != section) continue;
@@ -102,6 +102,7 @@ static partial class H4
                 if (section == "switch") await Switches();
                 if (section == "notes") await Notes();
                 if (section == "c3d") await SidebarMenu();
+                if (section == "bypass") await BypassSwitch();
             }
             catch (Exception e) { Log("SECTION ERROR " + section + " " + e); fails++; }
         }

@@ -6742,6 +6742,23 @@ class SettingsWindow : Window
     internal const string InstructionsTooLongNotice = "Your saved instructions are longer than 4,000 characters, so new chats start without them. Shorten them to use them again.";
     string capturedShortcut;
     readonly Border laptopWarning = new Border();
+    readonly Border bypassSwitch = new Border();
+    readonly Border bypassKnob = new Border();
+    readonly Border bypassWarning = new Border();
+    internal const string BypassTitle = "Bypass permissions for chats";
+    internal const string BypassHint = "New chats edit files, run commands and open sites without asking. Needs laptop access. Sign-in files are refused by name, which scripts can get past.";
+    internal const string BypassOnMessage = "Bypass permissions are on for new chats. Open chats keep their mode.";
+    internal const string BypassOffMessage = "Bypass permissions are off for new chats. Chats showing Bypass on keep it until you close them.";
+    internal const string BypassWarningTitle = "New chat windows will, without asking you first:";
+    internal static readonly string[] BypassWarningBullets =
+    {
+        "Read, edit and create files anywhere your Windows account can.",
+        "Run commands and programs, including ones that delete files or install software.",
+        "Open web sites and send them data, which can include your files.",
+    };
+    internal const string BypassStillAsked = "Still blocked or still asked: Claude Code refuses reads and searches that name its sign-in files or their copies. Changes to settings, git and tool-configuration files, this widget's own settings, start-up items and network paths still show a card.";
+    internal const string BypassNotBlocked = "Not blocked: this isn't an operating-system lock. A script or program Claude runs, such as Python, Node or PowerShell, can still read any of your files, including the sign-in files, and send them to a web site. Text in a web page, file or note could trick Claude into doing that, and no card would stop it. Changes can outlast the chat, for example to other programs' settings.";
+    internal const string BypassOpenChats = "Open chats keep their current mode; only new chats use this.";
     readonly TextBlock message = new TextBlock();
     readonly SolidColorBrush warnText = new SolidColorBrush();
     readonly SolidColorBrush switchOn = new SolidColorBrush();
@@ -6782,7 +6799,8 @@ class SettingsWindow : Window
         {
             if (e.Key != Key.Escape) return;
             e.Handled = true;
-            if (laptopWarning.Visibility == Visibility.Visible) laptopWarning.Visibility = Visibility.Collapsed;
+            if (bypassWarning.Visibility == Visibility.Visible) bypassWarning.Visibility = Visibility.Collapsed;
+            else if (laptopWarning.Visibility == Visibility.Visible) laptopWarning.Visibility = Visibility.Collapsed;
             else Close();
         };
     }
@@ -6898,6 +6916,8 @@ class SettingsWindow : Window
             "Lets new chats read your drives, search the web and, after you allow each one, edit files and run commands.",
             ToggleLaptop));
         stack.Children.Add(BuildLaptopWarning());
+        stack.Children.Add(BuildSwitchRow(bypassSwitch, bypassKnob, BypassTitle, BypassHint, ToggleBypass));
+        stack.Children.Add(BuildBypassWarning());
 
         TextBlock keep = Hint("Open chats keep what they started with. New chats use these.", false);
         keep.Margin = new Thickness(0, 16, 0, 0);
@@ -7215,6 +7235,81 @@ class SettingsWindow : Window
         return laptopWarning;
     }
 
+    UIElement BuildBypassWarning()
+    {
+        StackPanel stack = new StackPanel();
+        TextBlock title = new TextBlock();
+        title.Text = BypassWarningTitle;
+        title.FontSize = 12;
+        title.FontWeight = FontWeights.SemiBold;
+        title.Foreground = WidgetWindow.Text;
+        title.TextWrapping = TextWrapping.Wrap;
+        stack.Children.Add(title);
+        foreach (string line in BypassWarningBullets)
+        {
+            TextBlock item = Hint("\u2022 " + line, false);
+            item.Margin = new Thickness(0, 4, 0, 0);
+            stack.Children.Add(item);
+        }
+        TextBlock still = Hint(BypassStillAsked, false);
+        still.Margin = new Thickness(0, 6, 0, 0);
+        stack.Children.Add(still);
+        TextBlock notBlocked = Hint(BypassNotBlocked, true);
+        notBlocked.Margin = new Thickness(0, 6, 0, 0);
+        stack.Children.Add(notBlocked);
+        TextBlock open = Hint(BypassOpenChats, false);
+        open.Margin = new Thickness(0, 6, 0, 0);
+        stack.Children.Add(open);
+
+        Border turnOn = TextButton("Turn on", delegate { SetBypass(true); });
+        Border cancel = TextButton("Cancel", delegate { bypassWarning.Visibility = Visibility.Collapsed; });
+        cancel.Margin = new Thickness(0, 0, 8, 0);
+        StackPanel buttons = new StackPanel();
+        buttons.Orientation = Orientation.Horizontal;
+        buttons.HorizontalAlignment = HorizontalAlignment.Right;
+        buttons.Margin = new Thickness(0, 10, 0, 0);
+        buttons.Children.Add(cancel);
+        buttons.Children.Add(turnOn);
+        stack.Children.Add(buttons);
+
+        bypassWarning.Child = stack;
+        bypassWarning.CornerRadius = new CornerRadius(10);
+        bypassWarning.Padding = new Thickness(12, 10, 12, 10);
+        bypassWarning.Margin = new Thickness(0, 8, 0, 0);
+        bypassWarning.Background = WidgetWindow.OverlaySoft;
+        bypassWarning.BorderBrush = warnText;
+        bypassWarning.BorderThickness = new Thickness(1);
+        bypassWarning.Visibility = Visibility.Collapsed;
+        return bypassWarning;
+    }
+
+    // Needs laptop access, and never in a test copy. Turning on needs the warning confirmed; turning off takes effect at once.
+    void ToggleBypass()
+    {
+        if (widget.Bypass.Blocked)
+        {
+            ShowMessage("Bypass permissions aren't available in a test copy.", true);
+            return;
+        }
+        if (!laptopOn)
+        {
+            ShowMessage("Turn on laptop access first.", true);
+            return;
+        }
+        if (widget.BypassForNewChats) SetBypass(false);
+        else bypassWarning.Visibility = Visibility.Visible;
+    }
+
+    // Saved at once in chat-bypass.txt (BypassState), without Save. A failure is shown, and new chats stay normal.
+    void SetBypass(bool on)
+    {
+        string error = on ? (laptopOn ? widget.Bypass.TurnOn() : "Turn on laptop access first.") : widget.Bypass.TurnOff();
+        bypassWarning.Visibility = Visibility.Collapsed;
+        if (error != null) ShowMessage(error, true);
+        else ShowMessage(on ? BypassOnMessage : BypassOffMessage, false);
+        ShowSwitches();
+    }
+
     // Turning on needs the warning confirmed. Turning off takes effect at once, without Save.
     void ToggleLaptop()
     {
@@ -7227,6 +7322,7 @@ class SettingsWindow : Window
         try
         {
             string file = PathOf(AccessName);
+            bool bypassWasOn = !on && widget.BypassForNewChats;
             if (on)
             {
                 // Bypass is cleared before laptop access goes on, so turning it on again always needs the bypass warning.
@@ -7248,7 +7344,8 @@ class SettingsWindow : Window
             }
             laptopOn = on;
             laptopWarning.Visibility = Visibility.Collapsed;
-            ShowMessage(on ? "Laptop access is on for new chats." : "Laptop access is off for new chats.", false);
+            bypassWarning.Visibility = Visibility.Collapsed;
+            ShowMessage(on ? "Laptop access is on for new chats." : bypassWasOn ? "Laptop access and bypass permissions are off for new chats." : "Laptop access is off for new chats.", false);
         }
         catch (Exception e)
         {
@@ -7261,6 +7358,12 @@ class SettingsWindow : Window
     void ShowSwitches()
     {
         ShowSwitch(laptopSwitch, laptopKnob, laptopOn);
+        bool blocked = widget.Bypass.Blocked;
+        ShowSwitch(bypassSwitch, bypassKnob, laptopOn && widget.BypassForNewChats);
+        bool bypassAvailable = laptopOn && !blocked;
+        bypassSwitch.IsEnabled = bypassAvailable;
+        bypassSwitch.Opacity = bypassAvailable ? 1 : 0.4;
+        bypassSwitch.ToolTip = blocked ? "Not available in a test copy" : laptopOn ? BypassTitle : "Turn on laptop access first";
         ShowSwitch(alertsSwitch, alertsKnob, widget.alertsOn);
         ShowSwitch(updateSwitch, updateKnob, widget.updateCheckOn);
     }
