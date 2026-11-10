@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading.Tasks;
 // Permission decisions (quick mode, so CI runs it): PermissionDecision.Decide and ProtectedTargets, judged without
 // claude. Everything happens in scratch folders, with a decoy home through SignInGuard.HomeOverride.
 // Network paths use 203.0.113.1, an address reserved for documentation; the guard never opens them.
@@ -164,7 +167,8 @@ static class H20
         string[] other = { "git commit --no-verify -m x", "notepad " + Path.Combine(widget, "settings.txt"), "type " + prompts + "\\x.txt", "copy x \\\\203.0.113.1\\s\\", "echo x > .git/hooks/pre-commit" };
         string[] grepHome = { "grep -r token ~", "grep -R token ~/", "rg secret ~", "findstr /s /i token C:\\", "grep -r token /c/", "grep -rn token " + home.Replace('\\', '/') };
         string[] psHome = { "Get-ChildItem -Recurse $HOME | Select-String x", "gci -r $env:USERPROFILE", "dir /s %USERPROFILE%", "Get-ChildItem C:\\ -Recurse -Filter *.json" };
-        string[] fine = { "npm test", "dir", "git status", "git commit -m x", "grep -r foo .", "rg foo src", "python build.py", "ls -la notes", "Get-ChildItem -Recurse src" };
+        string[] fine = { "npm test", "dir", "git status", "git commit -m x", "grep -r foo .", "rg foo src", "python build.py", "ls -la notes", "Get-ChildItem -Recurse src",
+            "rg foo " + Path.Combine(home, "proj"), "grep -r foo ~/proj/src", "rg TODO $HOME/proj", "find ~/proj", @"Get-ChildItem -Recurse $env:USERPROFILE\proj", @"grep -r x C:\work" };
         Rows("H20-19 git settings", PermissionOutcome.Card, true, Laptop, Commands("Bash", git));
         Rows("H20-20 start-up items, profiles and rc files", PermissionOutcome.Card, true, Laptop, Commands("Bash", startupCommands));
         Rows("H20-21 --no-verify, the widget's folders, network paths and hooks", PermissionOutcome.Card, true, Laptop, Commands("Bash", other));
@@ -201,6 +205,20 @@ static class H20
             "Grep", In("pattern", "x", "path", @"\\203.0.113.1\s") };
         Rows("H20-31 unresolved reads and searches", PermissionOutcome.Card, false, Laptop, unresolved);
         Rows("H20-31 unresolved reads and searches", PermissionOutcome.Card, true, Laptop, unresolved);
+
+        // H20-32 (Worker A's g2 review): a write to an ordinary-looking file that is another name for a protected file.
+        string gitConfig = Path.Combine(proj, ".git", "config");
+        File.WriteAllText(gitConfig, "[core]");
+        string alias = Path.Combine(proj, "notes", "innocent.txt");
+        bool linked = CreateHardLinkW(alias, gitConfig, IntPtr.Zero);
+        Check("H20-32 bypass: a write or edit to a file with another name (a hard link) gets a card; a single-name file doesn't", linked
+            && Decide("Write", In("file_path", alias, "content", "x"), true, Laptop) == PermissionOutcome.Card
+            && Decide("Edit", In("file_path", alias, "old_string", "a", "new_string", "b"), true, Laptop) == PermissionOutcome.Card
+            && Decide("Write", In("file_path", plain, "content", "x"), true, Laptop) == PermissionOutcome.Allow);
+        Rows("H20-22 recursive searches from the home folder itself, with a trailing slash or quotes", PermissionOutcome.Card, true, Laptop,
+            Commands("Bash", "rg foo \"" + home + "\"", "grep -r foo " + home + "\\", "rg x $HOME/", "find ~ -name x", "find / -name x"));
+
+        G3();
     }
 
     static object[] Concat(this object[] a, object[] b)
@@ -209,5 +227,139 @@ static class H20
         a.CopyTo(all, 0);
         b.CopyTo(all, a.Length);
         return all;
+    }
+
+    // ---------- g3: the ask list, the per-request settings file, the deny rules and held files ----------
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern bool CreateHardLinkW(string link, string existing, IntPtr security);
+    const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+    static object Static(string name, params object[] args) { return typeof(ChatClient).GetMethod(name, Any).Invoke(null, args); }
+
+    static ChatRequest Plain()
+    {
+        ChatRequest r = new ChatRequest();
+        r.Prompt = "Hello";
+        r.Model = "";
+        r.Effort = "";
+        return r;
+    }
+
+    static string Arg(string arguments, string flag)
+    {
+        System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(arguments, flag + " \"([^\"]*)\"");
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    static List<string> AskList(string json)
+    {
+        Dictionary<string, object> settings = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+        Dictionary<string, object> permissions = (Dictionary<string, object>)settings["permissions"];
+        List<string> ask = new List<string>();
+        foreach (object o in (System.Collections.IEnumerable)permissions["ask"]) ask.Add((string)o);
+        if (settings.Count != 1 || permissions.Count != 1) ask.Add("(other keys)");
+        return ask;
+    }
+
+    static void G3()
+    {
+        string savedTemp = Environment.GetEnvironmentVariable("TEMP"), savedTmp = Environment.GetEnvironmentVariable("TMP"), savedPath = Environment.GetEnvironmentVariable("PATH");
+        string temp = Path.Combine(root, "temp");
+        Directory.CreateDirectory(temp);
+        Environment.SetEnvironmentVariable("TEMP", temp);
+        Environment.SetEnvironmentVariable("TMP", temp);
+        try { G3Checks(temp); }
+        finally
+        {
+            ChatClient.StartFaultForTests = null;
+            Environment.SetEnvironmentVariable("TEMP", savedTemp);
+            Environment.SetEnvironmentVariable("TMP", savedTmp);
+            Environment.SetEnvironmentVariable("PATH", savedPath);
+        }
+    }
+
+    static void G3Checks(string temp)
+    {
+        string claude = Path.Combine(root, "bin dir", "claude.exe");
+        string prompt = Path.Combine(temp, "ClaudeAccountWidget-chat", "0123456789abcdef0123456789abcdef.txt");
+
+        // H20-40 to 44: the ask list is the --tools list, for every kind of chat, and nothing else is in the file.
+        ChatRequest memory = Plain(); memory.MemoryFolder = Path.Combine(root, "memory");
+        ChatRequest links = Plain(); links.Links.Add("https://example.com/a");
+        ChatRequest folders = Plain(); folders.Folders.Add(Path.Combine(root, "attached"));
+        ChatRequest laptop = Plain(); laptop.Laptop = true; laptop.DefaultOutputFolder = Path.Combine(root, "out"); laptop.CurrentOutputFolder = delegate { return null; };
+        ChatRequest none = Plain();
+        var kinds = new[] { new { Id = "H20-40", Name = "memory only", R = memory }, new { Id = "H20-41", Name = "links", R = links }, new { Id = "H20-42", Name = "an attached folder", R = folders },
+            new { Id = "H20-43", Name = "laptop", R = laptop }, new { Id = "H20-43", Name = "no tools at all", R = none } };
+        foreach (var k in kinds)
+        {
+            ProcessStartInfo start = (ProcessStartInfo)Static("BuildStart", claude, k.R, prompt);
+            string tools = Arg(start.Arguments, "--tools");
+            List<string> want = tools.Length == 0 ? new List<string>() : new List<string>(tools.Split(','));
+            List<string> ask = AskList((string)Static("SettingsJson", (List<string>)Static("ToolsFor", k.R)));
+            Check(k.Id + " " + k.Name + ": the settings file's ask list is exactly the --tools list, with no allow rules", ask.SequenceEqual(want), string.Join(",", ask.ToArray()) + " vs " + tools);
+        }
+        List<string> withPs = new List<string> { "Read", "Grep", "Glob", "Edit", "Write", "Bash", "PowerShell", "WebSearch", "WebFetch" };
+        Check("H20-44 with PowerShell added, it's asked for too", AskList((string)Static("SettingsJson", withPs)).SequenceEqual(withPs));
+
+        // H20-45 to 47: the settings file is the request's own, beside its prompt file; no fixed-name file is left.
+        ProcessStartInfo laptopStart = (ProcessStartInfo)Static("BuildStart", claude, laptop, prompt);
+        string settingsArg = Arg(laptopStart.Arguments, "--settings");
+        Check("H20-45 --settings names <prompt name>.settings.json in the prompt folder", settingsArg == Path.Combine(temp, "ClaudeAccountWidget-chat", "0123456789abcdef0123456789abcdef.settings.json").Replace('\\', '/'), settingsArg);
+        string source = File.ReadAllText(Path.Combine(root, "..", "..", "..", "snapshot", "widget.cs"));
+        Check("H20-46 no fixed-name ask-first.json anywhere", !source.Contains("ask-first") && !laptopStart.Arguments.Contains("ask-first"));
+
+        Directory.CreateDirectory(Path.GetDirectoryName(claude));
+        File.WriteAllText(claude, "not a program");
+        Environment.SetEnvironmentVariable("PATH", Path.GetDirectoryName(claude));
+        string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
+        bool writeBlockedSettings = false, writeBlockedPrompt = false, readOk = false, bothThere = false, deleteBlocked = false;
+        string seenSettings = null;
+        ChatClient.StartFaultForTests = delegate(ProcessStartInfo info)
+        {
+            string p = Arg(info.Arguments, "--append-system-prompt-file").Replace('/', '\\');
+            string s = Arg(info.Arguments, "--settings").Replace('/', '\\');
+            bothThere = File.Exists(p) && File.Exists(s);
+            try { using (new FileStream(s, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { } } catch (IOException) { writeBlockedSettings = true; }
+            try { using (new FileStream(p, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { } } catch (IOException) { writeBlockedPrompt = true; }
+            try { File.Delete(s); } catch (IOException) { deleteBlocked = true; } catch (UnauthorizedAccessException) { deleteBlocked = true; }
+            try
+            {
+                using (FileStream f = new FileStream(s, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (StreamReader r = new StreamReader(f)) seenSettings = r.ReadToEnd();
+                using (new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)) { }
+                readOk = true;
+            }
+            catch (IOException) { }
+            return new IOException("stop here");
+        };
+        ChatResult failed = new ChatClient().Ask(laptop, delegate(string a, string b) { return Task.FromResult(false); }).Result;
+        ChatClient.StartFaultForTests = null;
+        System.Threading.Thread.Sleep(300);
+        Check("H20-47 a failed start: Failed, and the request's prompt and settings files are both gone", failed.Outcome == ChatOutcome.Failed && bothThere
+            && Directory.GetFiles(folder, "*.txt").Length == 0 && Directory.GetFiles(folder, "*.settings.json").Length == 0, failed.Outcome + " " + bothThere);
+        Check("H20-57 while the request is live, the settings file can't be opened for writing or deleted", writeBlockedSettings && deleteBlocked);
+        Check("H20-58 while the request is live, the prompt file can't be opened for writing", writeBlockedPrompt);
+        Check("H20-59 both can be read, sharing write as Claude Code does, and the settings file holds the ask list", readOk && seenSettings != null && AskList(seenSettings).SequenceEqual((List<string>)Static("ToolsFor", laptop)));
+        System.Collections.IDictionary held = (System.Collections.IDictionary)typeof(ChatClient).GetField("heldFiles", Any).GetValue(null);
+        Check("H20-60 after the request, no file is held open", held.Count == 0, held.Count.ToString());
+
+        // H20-48, 49: the deny rules.
+        List<string> rules = (List<string>)Static("DenyRules", (List<string>)Static("ToolsFor", laptop));
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).Replace('\\', '/');
+        List<string> missing = new List<string>();
+        foreach (string b in new[] { "~", "//" + home.Substring(0, 1).ToUpperInvariant() + home.Substring(2), "//" + home.Substring(0, 1).ToLowerInvariant() + home.Substring(2) })
+        {
+            foreach (string target in new[] { "/.claude/.credentials.json", "/.claude.json", "/.claude.json*", "/.claude/backups/**" })
+            {
+                foreach (string tool in new[] { "Read", "Edit", "Write" }) if (!rules.Contains(tool + "(" + b + target + ")")) missing.Add(tool + "(<b>" + target + ")");
+            }
+        }
+        foreach (string pattern in new[] { "claude auth *", "claude login*", "claude logout*", "*claude setup-token*", "*.credentials.json*", "*.claude.json*", "*.claude/.cred*", "*.claude\\.cred*" })
+        {
+            if (!rules.Contains("Bash(" + pattern + ")")) missing.Add("Bash(" + pattern + ")");
+        }
+        Check("H20-48 --disallowedTools has every DEC-3 rule: both drive cases and ~, the copies, the backups and the command patterns", missing.Count == 0 && laptopStart.Arguments.Contains("\"Read(~/.claude.json*)\""), string.Join(" ", missing.ToArray()));
+        List<string> psRules = (List<string>)Static("DenyRules", withPs);
+        Check("H20-49 PowerShell rules appear only when PowerShell is a tool", !rules.Any(r => r.StartsWith("PowerShell(")) && psRules.Count(r => r.StartsWith("PowerShell(")) == 8);
     }
 }

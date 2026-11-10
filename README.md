@@ -202,7 +202,7 @@ Read a card before you allow it, because a command can do anything your Windows 
 | `https://api.github.com/repos/Sh0aib-Ja0allah/claude-account-widget/releases?per_page=5` | Asked once a day for new releases, unless you turn update checks off in Settings. GitHub sees your IP address. No token, email or other account detail is sent |
 | `claude -p` | Runs once for each chat message, using your Claude Code sign-in |
 | `chat-instructions.txt` | Your saved instructions, if any. Read when a chat window starts or you click **New chat** |
-| A temporary file in `%TEMP%\ClaudeAccountWidget-chat` | Holds the saved instructions and the widget's rules for one `claude -p` request, so they never appear on a command line. Deleted when the reply ends; any left by a crash are removed after a day |
+| A temporary file in `%TEMP%\ClaudeAccountWidget-chat` | Holds the saved instructions and the widget's rules for one `claude -p` request, so they never appear on a command line. Beside it, a settings file for the same request asks Claude Code to check every tool call with the window, so the widget's own rules always apply. Both stay open, read-only to other programs, while the request runs, and are deleted when the reply ends; any left by a crash are removed after a day |
 | Your chat history folder | Claude can search and read its notes, and the widget writes one note for each chat |
 | Your files and web search | Only with laptop access on. See [Optional settings](#optional-settings) |
 

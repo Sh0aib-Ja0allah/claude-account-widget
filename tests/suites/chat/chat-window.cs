@@ -101,7 +101,7 @@ static class H3
             return;
         }
         // No mode makes a real Claude request: the old "real" mode was removed when the tests moved into the repo.
-        string[] sections = { "format", "live", "regen", "edit", "search", "instructions", "start", "long" };
+        string[] sections = { "format", "live", "regen", "edit", "search", "instructions", "start", "long", "bypass" };
         foreach (string section in sections)
         {
             if (mode != "all" && mode != section) continue;
@@ -116,6 +116,7 @@ static class H3
                 if (section == "instructions") await Instructions();
                 if (section == "start") await StartOffThread();
                 if (section == "long") await LongChats();
+                if (section == "bypass") await Permissions();
             }
             catch (Exception e) { Log("FAIL section " + section + " threw: " + e); fails++; }
         }
@@ -1398,7 +1399,7 @@ static class H3
             ChatClient stopping = new ChatClient();
             Task<ChatResult> pending = AskOnce(stopping, InstructionsRequest(Marker));
             await Task.Delay(1500);
-            Check("C-I3 the file exists while the request runs", Directory.GetFiles(folder).Length == 1);
+            Check("C-I3 the file exists while the request runs, with its settings file beside it", Directory.GetFiles(folder, "*.txt").Length == 1 && Directory.GetFiles(folder, "*.settings.json").Length == 1);
             stopping.Stop();
             ChatResult stopped = await pending;
             Check("C-I3 the file is gone after Stop", stopped.Outcome == ChatOutcome.Stopped && Directory.GetFiles(folder).Length == 0, stopped.Outcome.ToString());
@@ -1800,5 +1801,113 @@ static class H3
         o.Close();
         await Task.Delay(300);
         Check("C-L8 closing with a batch pending draws nothing more and nothing fails", pendingBatch && DrawnFrom(o) == frozen);
+    }
+
+    // ---------- chat-bypass: how each tool call is answered (C-B). The fake claude asks with can_use_tool and logs the
+    // answer as REPLY; a decoy home stands in for the profile, and the real sign-in files are never named. ----------
+    static string permHome, permProj;
+
+    static string Ask(string tool, string inputJson, int n)
+    {
+        return "{\"type\":\"control_request\",\"request_id\":\"r" + n + "\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"" + tool + "\",\"input\":" + inputJson + "}}";
+    }
+
+    // Plays one request in a normal laptop chat; returns the REPLY lines it logged and the cards that were asked for.
+    static async Task<List<Dictionary<string, object>>> Asked(List<string> cards, bool approve, params string[] toolAndInput)
+    {
+        List<string> lines = new List<string> { Sys };
+        for (int i = 0; i + 1 < toolAndInput.Length; i += 2)
+        {
+            lines.Add(Ask(toolAndInput[i], toolAndInput[i + 1], i / 2));
+            lines.Add("#read");
+        }
+        lines.Add(Result("done"));
+        Script(lines.ToArray());
+        int before = FakeLines("REPLY ").Count;
+        ChatRequest r = InstructionsRequest(null);
+        r.Laptop = true;
+        r.MemoryFolder = permProj;
+        r.WidgetFolder = data;
+        r.DefaultOutputFolder = Path.Combine(root, "perm-out");
+        r.CurrentOutputFolder = delegate { return null; };
+        ChatResult result = await new ChatClient().Ask(r, delegate(string tool, string detail) { lock (cards) cards.Add(tool); return Task.FromResult(approve); });
+        if (result.Outcome != ChatOutcome.Reply) Log("note: the request ended " + result.Outcome);
+        List<Dictionary<string, object>> replies = new List<Dictionary<string, object>>();
+        foreach (string line in FakeLines("REPLY ").Skip(before))
+        {
+            Dictionary<string, object> outer = json.Deserialize<Dictionary<string, object>>(line);
+            Dictionary<string, object> body = (Dictionary<string, object>)outer["response"];
+            replies.Add((Dictionary<string, object>)body["response"]);
+        }
+        return replies;
+    }
+
+    static bool All(List<Dictionary<string, object>> replies, int count, string behavior, string message = null)
+    {
+        return replies.Count == count && replies.All(r => (string)r["behavior"] == behavior && (message == null || (r.ContainsKey("message") && (string)r["message"] == message)));
+    }
+
+    static string Show(List<Dictionary<string, object>> replies)
+    {
+        return string.Join("; ", replies.Select(r => (string)r["behavior"] + (r.ContainsKey("message") ? " " + r["message"] : "")).ToArray());
+    }
+
+    static async Task Permissions()
+    {
+        permHome = Path.Combine(root, "perm-home");
+        permProj = Path.Combine(root, "perm-proj");
+        Directory.CreateDirectory(Path.Combine(permHome, ".claude"));
+        Directory.CreateDirectory(permProj);
+        File.WriteAllText(Path.Combine(permHome, ".claude", ".credentials.json"), "{\"decoy\":\"canary-7f3a\"}");
+        File.WriteAllText(Path.Combine(permHome, ".claude.json"), "{\"decoy\":\"canary-7f3a\"}");
+        File.WriteAllText(Path.Combine(permHome, ".claude.json.backup"), "{\"decoy\":\"canary-7f3a\"}");
+        string plain = Path.Combine(permProj, "notes.txt");
+        File.WriteAllText(plain, "ordinary");
+        SignInGuard.HomeOverride = permHome;
+        string signIn = (string)typeof(PermissionDecision).GetField("SignInMessage", Any).GetValue(null);
+        string declined = (string)typeof(PermissionDecision).GetField("DeclinedMessage", Any).GetValue(null);
+        try
+        {
+            List<string> cards = new List<string>();
+            List<Dictionary<string, object>> replies = await Asked(cards, false,
+                "Read", "{\"file_path\":" + Q(plain) + "}", "Grep", "{\"pattern\":\"x\",\"path\":" + Q(permProj) + "}",
+                "Glob", "{\"pattern\":\"**/*.txt\"}", "WebSearch", "{\"query\":\"weather\"}");
+            Check("C-B01 a normal laptop chat: Read, Grep, Glob and WebSearch reach the handler and are allowed with no card", All(replies, 4, "allow") && cards.Count == 0, Show(replies) + " cards " + cards.Count);
+
+            cards.Clear();
+            replies = await Asked(cards, true,
+                "Read", "{\"file_path\":" + Q(Path.Combine(permHome, ".claude.json")) + "}", "Read", "{\"file_path\":\"~/.claude.json.backup\"}",
+                "Read", "{\"file_path\":" + Q(Path.Combine(permHome, ".claude", ".credentials.json")) + "}", "Grep", "{\"pattern\":\"oauth\",\"path\":" + Q(permHome) + "}");
+            Check("C-B02 reading or searching the decoy sign-in files is refused with the exact message, and no card", All(replies, 4, "deny", signIn) && cards.Count == 0, Show(replies));
+
+            cards.Clear();
+            replies = await Asked(cards, true, "Edit", "{\"file_path\":" + Q(plain) + ",\"old_string\":\"a\",\"new_string\":\"b\"}",
+                "Write", "{\"file_path\":" + Q(Path.Combine(permProj, "new.txt")) + ",\"content\":\"x\"}");
+            Check("C-B03 Edit and Write get a card, as in v0.3.0; approved, they're allowed", All(replies, 2, "allow") && cards.SequenceEqual(new[] { "Edit", "Write" }), Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+
+            cards.Clear();
+            replies = await Asked(cards, false, "Bash", "{\"command\":\"npm test\",\"description\":\"tests\"}", "Bash", "{\"command\":\"cat ~/.claude.json\"}");
+            Check("C-B04 Bash gets a card and a decline says so; a command naming a sign-in file is refused without one",
+                replies.Count == 2 && (string)replies[0]["behavior"] == "deny" && (string)replies[0]["message"] == declined
+                && (string)replies[1]["behavior"] == "deny" && (string)replies[1]["message"] == signIn && cards.SequenceEqual(new[] { "Bash" }), Show(replies));
+
+            string settingsPath = FakeLines("SETTINGSFILE ").LastOrDefault() ?? "";
+            string settingsText = FakeLines("SETTINGS ").LastOrDefault() ?? "";
+            Dictionary<string, object> settings = null;
+            try { settings = json.Deserialize<Dictionary<string, object>>(settingsText); } catch (Exception) { }
+            Dictionary<string, object> perms = settings != null && settings.ContainsKey("permissions") ? settings["permissions"] as Dictionary<string, object> : null;
+            List<string> ask = perms != null && perms.ContainsKey("ask") ? ((System.Collections.IEnumerable)perms["ask"]).Cast<object>().Select(o => (string)o).ToList() : new List<string>();
+            string folder = (string)typeof(ChatClient).GetMethod("PromptFolder", Any).Invoke(null, null);
+            Check("C-B05 claude read the request's own settings file: its ask list is the chat's tools, with no allow rules",
+                ask.SequenceEqual(new[] { "Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebSearch", "WebFetch" }) && perms.Count == 1 && settings.Count == 1
+                && settingsPath.Replace('/', '\\').StartsWith(folder + "\\") && settingsPath.EndsWith(".settings.json"), settingsText);
+            await Task.Delay(300);
+            Check("C-B06 after the reply, the request's prompt and settings files are gone", Directory.GetFiles(folder, "*.txt").Length == 0 && Directory.GetFiles(folder, "*.settings.json").Length == 0);
+
+            cards.Clear();
+            replies = await Asked(cards, false, "Read", "{\"file_path\":\"\\\\\\\\?\\\\UNC\\\\203.0.113.1\\\\s\\\\x.txt\"}", "Glob", "{\"pattern\":\"*\",\"path\":\"\\\\\\\\.\\\\pipe\\\\x\"}");
+            Check("C-B06 a read or search the guard can't resolve gets a card in a normal chat (DEC-18)", All(replies, 2, "deny", declined) && cards.SequenceEqual(new[] { "Read", "Glob" }), Show(replies) + " cards " + string.Join(",", cards.ToArray()));
+        }
+        finally { SignInGuard.HomeOverride = null; }
     }
 }

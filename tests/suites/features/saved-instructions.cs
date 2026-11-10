@@ -174,16 +174,35 @@ static class H17
         t.Add("--tools"); t.Add(tools);
         t.Add("--append-system-prompt"); t.Add(rules);
         if (addDirs.Count > 0) { t.Add("--add-dir"); t.AddRange(addDirs); }
+        // g3: the settings file is the request's own, beside its prompt file, and the deny rules cover the copies,
+        // the backups and both drive-letter cases (written out by hand, as in the plan's DEC-3).
         t.Add("--settings"); t.Add(settings);
         t.Add("--disallowedTools");
-        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        foreach (string file in new[] { Path.Combine(home, ".claude", ".credentials.json"), Path.Combine(home, ".claude.json") })
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).Replace('\\', '/');
+        List<string> bases = new List<string> { "~", "//" + home.Substring(0, 1).ToUpperInvariant() + home.Substring(2), "//" + home.Substring(0, 1).ToLowerInvariant() + home.Substring(2) };
+        foreach (string b in bases)
         {
-            string rule = "//" + file.Replace('\\', '/').Replace(":", "");
-            t.Add("Read(" + rule + ")"); t.Add("Edit(" + rule + ")"); t.Add("Write(" + rule + ")");
+            foreach (string target in new[] { "/.claude/.credentials.json", "/.claude.json", "/.claude.json*", "/.claude/backups/**" })
+            {
+                t.Add("Read(" + b + target + ")"); t.Add("Edit(" + b + target + ")"); t.Add("Write(" + b + target + ")");
+            }
         }
-        t.AddRange(new[] { "Bash(claude auth *)", "Bash(claude login*)", "Bash(claude logout*)", "Bash(*.credentials.json*)" });
+        t.AddRange(new[] { "Bash(claude auth *)", "Bash(claude login*)", "Bash(claude logout*)", "Bash(*claude setup-token*)", "Bash(*.credentials.json*)",
+            "Bash(*.claude.json*)", "Bash(*.claude/.cred*)", "Bash(*.claude\\.cred*)" });
         return t;
+    }
+
+    // Reads a file the widget holds open for a live request, sharing write as Claude Code does.
+    static string ReadShared(string path)
+    {
+        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (StreamReader r = new StreamReader(f, new UTF8Encoding(false))) return r.ReadToEnd();
+    }
+
+    static byte[] ReadSharedBytes(string path)
+    {
+        using (FileStream f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (MemoryStream m = new MemoryStream()) { f.CopyTo(m); return m.ToArray(); }
     }
 
     static void Launch()
@@ -205,7 +224,7 @@ static class H17
     {
         const string Marker = "Answer like a pirate called Quillfeather";
         string promptFile = Path.Combine(temp, "ClaudeAccountWidget-chat", "f.txt");
-        string settings = Path.Combine(temp, "ClaudeAccountWidget-ask-first.json");
+        string settings = Path.Combine(temp, "ClaudeAccountWidget-chat", "f.settings.json").Replace('\\', '/');
         string fileArg = promptFile.Replace('\\', '/');
 
         // H17-10: three kinds of request; the only change from 1768b9e is the rules flag
@@ -237,7 +256,7 @@ static class H17
             want[at] = "--append-system-prompt-file";
             want[at + 1] = fileArg;
             int diff = Enumerable.Range(0, Math.Min(got.Count, want.Count)).FirstOrDefault(i => got[i] != want[i]);
-            Check("H17-10 " + c.Name + ": the flags are 1768b9e's with only the rules flag swapped for the file", got.SequenceEqual(want),
+            Check("H17-10 " + c.Name + ": the flags are 1768b9e's with the rules flag swapped for the file, and g3's settings file and deny rules", got.SequenceEqual(want),
                 got.Count + " vs " + want.Count + " tokens; first difference at " + diff + ": " + (diff < got.Count ? got[diff] : "-") + " | " + (diff < want.Count ? want[diff] : "-"));
             Check("H17-10 " + c.Name + ": the rules in the file are 1768b9e's rules", (string)Static("Rules", c.R) == c.Rules);
             Check("H17-11 " + c.Name + ": no instruction or rule text on the command line", !start.Arguments.Contains("Quillfeather") && !start.Arguments.Contains("You are chatting in"));
@@ -256,7 +275,7 @@ static class H17
         string folder = Path.Combine(temp, "ClaudeAccountWidget-chat");
         Check("H17-14 the file is in %TEMP%\\ClaudeAccountWidget-chat with a fresh name", Path.GetDirectoryName(written) == folder && Path.GetExtension(written) == ".txt"
             && Path.GetFileNameWithoutExtension(written).Length == 32, written);
-        byte[] bytes = File.ReadAllBytes(written);
+        byte[] bytes = ReadSharedBytes(written);
         Check("H17-14 UTF-8 without a byte order mark, holding the text", bytes[0] == (byte)'T' && new UTF8Encoding(false).GetString(bytes) == withText);
         string second = (string)Static("WritePromptFile", plain);
         Check("H17-14 each request gets its own file", second != written && File.Exists(written) && File.Exists(second));
@@ -583,8 +602,8 @@ static class H17
         // H17-61: without instructions the prompt file is byte-equal to the 1768b9e rules
         ChatRequest plain = Request(null);
         string written = (string)Static("WritePromptFile", plain);
-        Check("H17-61 no instructions: the prompt file is exactly the 1768b9e rules text", File.ReadAllText(written, new UTF8Encoding(false)) == FrozenPlainRules
-            && File.ReadAllBytes(written).Length == Encoding.UTF8.GetByteCount(FrozenPlainRules));
+        Check("H17-61 no instructions: the prompt file is exactly the 1768b9e rules text", ReadShared(written) == FrozenPlainRules
+            && ReadSharedBytes(written).Length == Encoding.UTF8.GetByteCount(FrozenPlainRules));
         Static("DeletePromptFile", written);
 
         // H17-62: without instructions a note is byte-equal to 1768b9e's, apart from updated:
@@ -611,7 +630,7 @@ static class H17
 
         // H17-64: the .cmd route and a fourth kind of request (an attached folder), token by token
         string fileArg = Path.Combine(temp, "ClaudeAccountWidget-chat", "f.txt");
-        string settings = Path.Combine(temp, "ClaudeAccountWidget-ask-first.json");
+        string settings = Path.Combine(temp, "ClaudeAccountWidget-chat", "f.settings.json").Replace('\\', '/');
         ChatRequest attached = Request("Use the attached folder");
         attached.Folders.Add(Path.Combine(root, "attached folder"));
         foreach (string claude in new[] { claudeExe, Path.Combine(root, "npm dir", "claude.cmd") })
@@ -628,7 +647,7 @@ static class H17
             List<string> want = OldTokens(attached, "Read,Grep,Glob", FrozenPlainRules, attached.Folders.Select(f => f.Replace('\\', '/')).ToList(), settings);
             int at = want.IndexOf("--append-system-prompt");
             want[at] = "--append-system-prompt-file"; want[at + 1] = fileArg.Replace('\\', '/');
-            Check("H17-64 attached folder" + (viaCmd ? " via .cmd" : "") + ": 1768b9e's flags with only the rules flag swapped", Tokens(arguments).SequenceEqual(want));
+            Check("H17-64 attached folder" + (viaCmd ? " via .cmd" : "") + ": 1768b9e's flags with the rules flag swapped, and g3's settings file and deny rules", Tokens(arguments).SequenceEqual(want));
         }
         Check("H17-64 attached folder: the rules are 1768b9e's", (string)Static("Rules", attached) == Const("StyleRule") + Const("NoRecallRule") + Const("FolderOnlyRule") + Const("DataRule"));
 
@@ -639,7 +658,7 @@ static class H17
         ProcessStartInfo ps = (ProcessStartInfo)Static("BuildStart", Path.Combine(root, "npm dir", "claude.cmd"), Request("x"), fileArg);
         Check("H17-65 hostile instructions change nothing on the command line", hs.Arguments == ps.Arguments && !hs.Arguments.Contains("evil.json") && !hs.Arguments.Contains("whoami"));
         string hostileFile = (string)Static("WritePromptFile", bad);
-        Check("H17-65 the file holds them verbatim between the preamble and the rules", File.ReadAllText(hostileFile, new UTF8Encoding(false)) == Const("InstructionsPreamble") + "\n\n" + hostile + "\n\n" + FrozenPlainRules);
+        Check("H17-65 the file holds them verbatim between the preamble and the rules", ReadShared(hostileFile) == Const("InstructionsPreamble") + "\n\n" + hostile + "\n\n" + FrozenPlainRules);
         Static("DeletePromptFile", hostileFile);
 
         // H17-66: unreadable files read as none, without an exception; Save(null) is handled
@@ -704,7 +723,8 @@ static class H17
         {
             string held = (string)Static("WritePromptFile", plain);
             Stopwatch timer;
-            using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.None))
+            // Another program holding it open without sharing delete; it has to share write, because the widget holds it too.
+            using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
                 timer = Stopwatch.StartNew();
                 Static("DeletePromptFile", held);

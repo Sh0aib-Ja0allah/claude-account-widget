@@ -286,7 +286,10 @@ static class H19
         ds.AddAccessRule(new FileSystemAccessRule(me, FileSystemRights.ListDirectory, AccessControlType.Deny));
         Directory.SetAccessControl(deniedDir, ds);
         All("H19-27 an access-denied file", GuardResult.Unresolved, Read, locked);
-        All("H19-28 an overlong path to an ordinary file", GuardResult.Unresolved, Read, proj + "\\" + new StringBuilder().Insert(0, @".\", 300) + "plain.txt");
+        All("H19-28 an overlong path to an ordinary file that opens is Clear", GuardResult.Clear, Read, proj + "\\" + new StringBuilder().Insert(0, @".\", 300) + "plain.txt",
+            proj + "\\" + new string('d', 120) + "\\" + new string('e', 120) + @"\..\..\plain.txt");
+        All("H19-28 an overlong path to a hard link of the decoy is SignIn", GuardResult.SignIn, Read, proj + "\\" + new StringBuilder().Insert(0, @".\", 300) + "notes.txt");
+        All("H19-28 an overlong path that can't be opened is Unresolved", GuardResult.Unresolved, Read, proj + "\\" + new StringBuilder().Insert(0, @".\", 300) + "missing.txt");
 
         // H19-29 to 31: files that don't exist yet.
         All("H19-29 a new ordinary file, also in new folders", GuardResult.Clear, Write, Path.Combine(proj, "new.txt"), Path.Combine(proj, "a", "b", "new.txt"), "relative-new.txt");
@@ -382,6 +385,10 @@ static class H19
         string driveRoot = plain.Substring(0, 3);
         Check("H19-54 the open log also sees the drive-type check and the backups folder", opened.Contains(driveRoot) && opened.Exists(o => o.EndsWith(@"\.claude\backups", StringComparison.OrdinalIgnoreCase)),
             string.Join(", ", opened.ConvertAll(o => Show(o)).ToArray()));
+
+        // H19-55 (the PE's follow-up): \??\ is never a local path, whatever its question marks do.
+        NeverClear("H19-55 an NT-namespace path (backslash, two question marks, backslash)", @"\??\" + plain, @"\??\UNC\203.0.113.1\s\x", "/??/" + plain.Replace(@"\", "/"));
+        Check("H19-55 LocalDisk turns down the NT-namespace prefix itself", !(bool)typeof(SignInGuard).GetMethod("LocalDisk", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { @"\??\C:\x" }));
 
         // H19-49, 50 (DEC-23): the guard's comment is honest about the check-then-use gap.
         string source = File.ReadAllText(Path.Combine(root, "..", "..", "..", "snapshot", "widget.cs"));
