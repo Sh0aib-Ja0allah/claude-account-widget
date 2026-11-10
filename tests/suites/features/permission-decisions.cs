@@ -539,6 +539,15 @@ static class H20
             new[] { "Failed", "line 429: syntax error" },
             new[] { "Failed", "error 401 in the test fixture" },
             new[] { "Failed", "You are not logged in to the npm registry" },
+            // f1c.
+            new[] { "NotSignedIn", "Not logged in to claude.ai" },
+            new[] { "NotSignedIn", "API Error (401)" },
+            new[] { "NotSignedIn", "Error 401: Unauthorized" },
+            new[] { "UsageLimit", "API Error (429)" },
+            new[] { "UsageLimit", "Error 429: Too Many Requests" },
+            new[] { "Failed", "Context window limit reached" },
+            new[] { "Failed", "Not logged in to the package mirror" },
+            new[] { "Failed", "error (4010) while parsing" },
         };
         List<string> wrong = new List<string>();
         foreach (string[] row in rows)

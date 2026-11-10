@@ -5460,16 +5460,18 @@ class ChatClient
     // login.html or signin.cs must never say the user isn't signed in. A 401 or 429 counts only as a status code.
     // Anything unsure is the plain Failed message. The phrases are the ones Claude Code 2.1.318 contains. "Invalid API
     // key" alone is about an API key, not the sign-in, so it's plain Failed unless "run /login" comes with it.
-    // A status code: after status, status code, statusCode, HTTP (and HTTP/1.1), code or _code, or after error with a
-    // colon or equals sign ("API Error: 401", not "error 401 in the test fixture"). {0} is the code.
+    // A status code: after status, status code, statusCode, HTTP (and HTTP/1.1), code or _code; after error with a colon
+    // or equals sign, or in brackets ("API Error: 401", "API Error (401)", not "error 401 in the test fixture"); or
+    // followed by its name ("Error 401: Unauthorized"). {0} is the code.
     const string StatusCode =
-        @"(?:(?:\bstatus(?:[ _]?code)?|\bhttp(?:/\d(?:\.\d)?)?|_code|\bcode)[""':=\s]{{1,4}}|\berror[""']?\s*[:=]\s*[""']?){0}\b|\b{0} (?:unauthorized|too many requests)\b";
+        @"(?:(?:\bstatus(?:[ _]?code)?|\bhttp(?:/\d(?:\.\d)?)?|_code|\bcode)[""':=\s]{{1,4}}|\berror[""']?\s*[:=]\s*[""']?){0}\b|" +
+        @"\berror\s*\(\s*{0}\s*\)|\b{0}:?\s+(?:unauthorized|too many requests)\b";
     static readonly string SignInErrors =
-        @"\bnot logged in\b(?!\s+to\b)|\brun /login\b|\bauthentication_error\b|\boauth token(?: has| has been)? (?:revoked|expired)\b|\blogin expired\b|" +
+        @"\bnot logged in\b(?!\s+to\b(?!\s+claude\.ai\b))|\brun /login\b|\bauthentication_error\b|\boauth token(?: has| has been)? (?:revoked|expired)\b|\blogin expired\b|" +
         string.Format(StatusCode, "401");
     // A context or token limit is about the conversation, not the account's usage.
     static readonly string UsageErrors =
-        @"\busage limit\b|\b(?<!context |token )limit reached\b|\bhit your\b[^\n]{0,40}?\blimit\b|\brate limit\b|" +
+        @"\busage limit\b|\b(?<!(?:context(?: window)?|token) )limit reached\b|\bhit your\b[^\n]{0,40}?\blimit\b|\brate limit\b|" +
         string.Format(StatusCode, "429");
 
     static ChatResult Classify(string detail)
